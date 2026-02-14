@@ -1,0 +1,14 @@
+[package]
+name = "toolchain-arm-eabi"
+version = "4.9-2017.01"
+description = "Linaro GCC 4.9 arm-eabi toolchain"
+
+[build]
+source = "https://releases.linaro.org/components/toolchain/binaries/4.9-2017.01/arm-eabi/gcc-linaro-4.9.4-2017.01-x86_64_arm-eabi.tar.xz"
+checksum = ""
+script = """
+if [ ! -d bin ]; then
+  echo "Toolchain bin/ not found after extraction"
+  exit 1
+fi
+"""

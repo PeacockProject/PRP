@@ -1,0 +1,33 @@
+[package]
+name = "device-qemu-x86_64"
+version = "1.0.0"
+description = "QEMU x86_64 virtual device package"
+
+[build]
+dependencies = ["linux", "linux-firmware", "mkinitcpio", "iptables-nft"]
+dependencies_systemd = ["base"]
+dependencies_openrc = [
+    "filesystem",
+    "glibc",
+    "bash",
+    "coreutils",
+    "util-linux",
+    "openrc",
+    "sysvinit-tools",
+    "procps-ng",
+    "grep",
+    "sed",
+    "gawk",
+    "tar",
+    "pacman",
+    "gcc-libs",
+    "shadow",
+    "psmisc",
+    "iproute2",
+    "iputils",
+    "inetutils",
+    "nano",
+    "dhcpcd",
+    "udev-openrc"
+]
+script = "echo 'Metapackage installed'"

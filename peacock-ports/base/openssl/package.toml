@@ -1,0 +1,20 @@
+[package]
+name = "openssl"
+version = "3.6.1"
+description = "OpenSSL toolkit and headers (Arch version)"
+
+[build]
+source = "https://github.com/openssl/openssl/releases/download/openssl-3.6.1/openssl-3.6.1.tar.gz"
+checksum = ""
+script = """
+tarball="$(ls -1 openssl-*.tar.gz 2>/dev/null | head -n1)"
+if [ -n "$tarball" ]; then
+  tar -xzf "$tarball" --strip-components=1
+fi
+./Configure --prefix="$(pwd)/stage" --openssldir="$(pwd)/stage/ssl" shared
+make -j$(nproc)
+make install_sw
+cp -a stage/bin ./
+cp -a stage/lib ./
+cp -a stage/include ./
+"""

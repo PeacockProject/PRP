@@ -1,0 +1,574 @@
+[package]
+name = "peacock-sddm-theme-peacock-phone"
+version = "1.0.6"
+description = "PeacockOS phone-first SDDM theme (touch friendly, dark)"
+depends = ["sddm"]
+
+[build]
+script = """
+set -e
+
+THEME_DIR="$PWD/stage/usr/share/sddm/themes/peacock-phone"
+install -d "$THEME_DIR"
+
+cat > "$THEME_DIR/metadata.desktop" <<'EOF'
+[SddmGreeterTheme]
+Name=Peacock Phone
+Description=PeacockOS phone-first SDDM theme
+Author=PeacockOS
+Copyright=(c) 2026 PeacockOS
+License=CC-BY-SA
+Type=sddm-theme
+Version=1.0
+MainScript=Main.qml
+ConfigFile=theme.conf
+Theme-Id=peacock-phone
+Theme-API=2.0
+EOF
+
+cat > "$THEME_DIR/theme.conf" <<'EOF'
+[General]
+# Optional: place your custom background image here.
+# If missing, the theme falls back to a pure black background.
+background=/etc/peacock/sddm-background.png
+EOF
+
+cat > "$THEME_DIR/Main.qml" <<'EOF'
+import QtQuick 2.0
+import SddmComponents 2.0
+
+Rectangle {
+    id: root
+    width: 720
+    height: 1280
+    color: "#000000"
+
+    property real density: Math.max(0.85, Math.min(1.55, Math.min(width / 720.0, height / 1280.0)))
+    property real margin: 26 * density
+    property real headerH: 170 * density
+    property real pickerH: 96 * density
+    property real footerH: 116 * density
+    property bool showKeyboard: name.activeFocus || password.activeFocus
+    property real keyboardH: showKeyboard ? (302 * density) : 0
+    property int sessionIndex: session.index
+
+    function vkTarget() {
+        return password.activeFocus ? password : name
+    }
+
+    function vkAppend(ch) {
+        var t = vkTarget()
+        t.text = (t.text || "") + ch
+    }
+
+    function vkBackspace() {
+        var t = vkTarget()
+        if (!t.text || t.text.length === 0) return
+        t.text = t.text.slice(0, t.text.length - 1)
+    }
+
+    TextConstants { id: textConstants }
+
+    Connections {
+        target: sddm
+        onLoginSucceeded: {
+            statusText.color = "#8ee08e"
+            statusText.text = textConstants.loginSucceeded
+        }
+        onLoginFailed: {
+            password.text = ""
+            statusText.color = "#ff7a7a"
+            statusText.text = textConstants.loginFailed
+        }
+        onInformationMessage: {
+            statusText.color = "#ffb86c"
+            statusText.text = message
+        }
+    }
+
+    Image {
+        id: bg
+        anchors.fill: parent
+        source: (config.background && config.background.length > 0) ? config.background : ""
+        fillMode: Image.PreserveAspectCrop
+        visible: source !== "" && status === Image.Ready
+        opacity: 0.30
+    }
+
+    Rectangle {
+        anchors.fill: parent
+        color: "#000000"
+        opacity: bg.visible ? 0.58 : 0.0
+    }
+
+    Rectangle {
+        id: header
+        x: root.margin
+        y: root.margin
+        width: root.width - (root.margin * 2)
+        height: root.headerH
+        radius: 22 * root.density
+        color: "#050505"
+        border.width: Math.max(1, Math.round(2 * root.density))
+        border.color: "#ffffff"
+
+        Column {
+            anchors.fill: parent
+            anchors.leftMargin: 22 * root.density
+            anchors.rightMargin: 22 * root.density
+            anchors.topMargin: 20 * root.density
+            anchors.bottomMargin: 18 * root.density
+            spacing: 8 * root.density
+
+            Text {
+                text: "PeacockOS"
+                color: "#ffffff"
+                font.pixelSize: 44 * root.density
+                font.bold: true
+                elide: Text.ElideRight
+                width: parent.width
+            }
+
+            Text {
+                text: "Touch Login"
+                color: "#d0d0d0"
+                font.pixelSize: 24 * root.density
+            }
+
+            Text {
+                text: textConstants.welcomeText.arg(sddm.hostName)
+                color: "#9c9c9c"
+                font.pixelSize: 20 * root.density
+                elide: Text.ElideRight
+                width: parent.width
+            }
+        }
+    }
+
+    Flickable {
+        id: formFlick
+        x: root.margin
+        y: pickerStrip.y + pickerStrip.height + (12 * root.density)
+        width: root.width - (root.margin * 2)
+        height: root.height - y - root.footerH - root.keyboardH - (22 * root.density)
+        contentWidth: width
+        contentHeight: formColumn.height + (22 * root.density)
+        clip: true
+        interactive: contentHeight > height
+
+        Column {
+            id: formColumn
+            width: formFlick.width
+            spacing: 16 * root.density
+
+            Rectangle {
+                id: formCard
+                width: parent.width
+                height: formCardContent.implicitHeight + (44 * root.density)
+                radius: 22 * root.density
+                color: "#070707"
+                border.width: Math.max(1, Math.round(2 * root.density))
+                border.color: "#2c2c2c"
+
+                Column {
+                    id: formCardContent
+                    x: 22 * root.density
+                    y: 22 * root.density
+                    width: parent.width - (44 * root.density)
+                    spacing: 12 * root.density
+
+                    Text {
+                        text: textConstants.userName
+                        color: "#f2f2f2"
+                        font.pixelSize: 24 * root.density
+                        font.bold: true
+                    }
+
+                    Rectangle {
+                        width: parent.width
+                        height: 84 * root.density
+                        radius: 14 * root.density
+                        color: "#111111"
+                        border.width: Math.max(1, Math.round(2 * root.density))
+                        border.color: name.activeFocus ? "#ffffff" : "#3a3a3a"
+
+                        TextInput {
+                            id: name
+                            anchors.fill: parent
+                            anchors.leftMargin: 14 * root.density
+                            anchors.rightMargin: 14 * root.density
+                            text: userModel.lastUser
+                            color: "#f5f5f5"
+                            selectionColor: "#3a3a3a"
+                            selectedTextColor: "#ffffff"
+                            font.pixelSize: 29 * root.density
+                            verticalAlignment: TextInput.AlignVCenter
+                            clip: true
+                            KeyNavigation.tab: password
+                        }
+                    }
+
+                    Text {
+                        text: textConstants.password
+                        color: "#f2f2f2"
+                        font.pixelSize: 24 * root.density
+                        font.bold: true
+                    }
+
+                    Rectangle {
+                        width: parent.width
+                        height: 84 * root.density
+                        radius: 14 * root.density
+                        color: "#111111"
+                        border.width: Math.max(1, Math.round(2 * root.density))
+                        border.color: password.activeFocus ? "#ffffff" : "#3a3a3a"
+
+                        TextInput {
+                            id: password
+                            anchors.fill: parent
+                            anchors.leftMargin: 14 * root.density
+                            anchors.rightMargin: 14 * root.density
+                            color: "#f5f5f5"
+                            selectionColor: "#3a3a3a"
+                            selectedTextColor: "#ffffff"
+                            echoMode: TextInput.Password
+                            font.pixelSize: 29 * root.density
+                            verticalAlignment: TextInput.AlignVCenter
+                            clip: true
+                            KeyNavigation.backtab: name
+                            KeyNavigation.tab: loginBtn
+                            Keys.onPressed: {
+                                if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                                    sddm.login(name.text, password.text, sessionIndex)
+                                    event.accepted = true
+                                }
+                            }
+                        }
+                    }
+
+                    Text {
+                        id: statusText
+                        width: parent.width
+                        text: textConstants.prompt
+                        color: "#bfbfbf"
+                        font.pixelSize: 22 * root.density
+                        horizontalAlignment: Text.AlignHCenter
+                        wrapMode: Text.WordWrap
+                    }
+
+                    Rectangle {
+                        id: loginBtn
+                        width: parent.width
+                        height: 96 * root.density
+                        radius: 18 * root.density
+                        color: "#101010"
+                        border.width: Math.max(1, Math.round(2 * root.density))
+                        border.color: "#ffffff"
+
+                        Text {
+                            anchors.centerIn: parent
+                            text: textConstants.login
+                            color: "#ffffff"
+                            font.pixelSize: 33 * root.density
+                            font.bold: true
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            onClicked: sddm.login(name.text, password.text, sessionIndex)
+                        }
+
+                        KeyNavigation.backtab: password
+                        KeyNavigation.tab: session
+                    }
+                }
+            }
+        }
+    }
+
+    Rectangle {
+        id: pickerStrip
+        x: root.margin
+        y: header.y + header.height + (10 * root.density)
+        width: root.width - (root.margin * 2)
+        height: root.pickerH
+        radius: 16 * root.density
+        color: "#090909"
+        border.width: Math.max(1, Math.round(1 * root.density))
+        border.color: "#2d2d2d"
+
+        Row {
+            anchors.fill: parent
+            anchors.margins: 12 * root.density
+            spacing: 12 * root.density
+
+            Column {
+                width: (parent.width - parent.spacing) / 2
+                spacing: 4 * root.density
+                Text {
+                    text: textConstants.session
+                    color: "#b8b8b8"
+                    font.pixelSize: 16 * root.density
+                    font.bold: true
+                }
+                ComboBox {
+                    id: session
+                    width: parent.width
+                    height: 46 * root.density
+                    model: sessionModel
+                    index: sessionModel.lastIndex
+                    font.pixelSize: 19 * root.density
+                    KeyNavigation.backtab: loginBtn
+                    KeyNavigation.tab: layoutBox
+                }
+            }
+
+            Column {
+                width: (parent.width - parent.spacing) / 2
+                spacing: 4 * root.density
+                Text {
+                    text: textConstants.layout
+                    color: "#b8b8b8"
+                    font.pixelSize: 16 * root.density
+                    font.bold: true
+                }
+                LayoutBox {
+                    id: layoutBox
+                    width: parent.width
+                    height: 46 * root.density
+                    font.pixelSize: 19 * root.density
+                    KeyNavigation.backtab: session
+                    KeyNavigation.tab: rebootBtn
+                }
+            }
+        }
+    }
+
+    Rectangle {
+        id: vkPanel
+        x: root.margin
+        y: powerRow.y - root.keyboardH - (8 * root.density)
+        width: root.width - (root.margin * 2)
+        height: root.keyboardH
+        visible: root.showKeyboard
+        opacity: root.showKeyboard ? 1.0 : 0.0
+        radius: 16 * root.density
+        color: "#090909"
+        border.width: Math.max(1, Math.round(1 * root.density))
+        border.color: "#2f2f2f"
+
+        Column {
+            anchors.fill: parent
+            anchors.margins: 10 * root.density
+            spacing: 8 * root.density
+
+            Row {
+                width: parent.width
+                spacing: 6 * root.density
+                Repeater {
+                    model: ["q","w","e","r","t","y","u","i","o","p"]
+                    delegate: Rectangle {
+                        width: (parent.width - parent.spacing * 9) / 10
+                        height: 50 * root.density
+                        radius: 10 * root.density
+                        color: "#141414"
+                        border.width: 1
+                        border.color: "#3a3a3a"
+                        Text { anchors.centerIn: parent; text: modelData; color: "#ffffff"; font.pixelSize: 22 * root.density; font.bold: true }
+                        MouseArea { anchors.fill: parent; onClicked: root.vkAppend(modelData) }
+                    }
+                }
+            }
+
+            Row {
+                width: parent.width
+                spacing: 6 * root.density
+                Repeater {
+                    model: ["a","s","d","f","g","h","j","k","l"]
+                    delegate: Rectangle {
+                        width: (parent.width - parent.spacing * 8) / 9
+                        height: 50 * root.density
+                        radius: 10 * root.density
+                        color: "#141414"
+                        border.width: 1
+                        border.color: "#3a3a3a"
+                        Text { anchors.centerIn: parent; text: modelData; color: "#ffffff"; font.pixelSize: 22 * root.density; font.bold: true }
+                        MouseArea { anchors.fill: parent; onClicked: root.vkAppend(modelData) }
+                    }
+                }
+            }
+
+            Row {
+                width: parent.width
+                spacing: 6 * root.density
+                Repeater {
+                    model: ["z","x","c","v","b","n","m"]
+                    delegate: Rectangle {
+                        width: (parent.width - parent.spacing * 8 - (108 * root.density)) / 7
+                        height: 50 * root.density
+                        radius: 10 * root.density
+                        color: "#141414"
+                        border.width: 1
+                        border.color: "#3a3a3a"
+                        Text { anchors.centerIn: parent; text: modelData; color: "#ffffff"; font.pixelSize: 22 * root.density; font.bold: true }
+                        MouseArea { anchors.fill: parent; onClicked: root.vkAppend(modelData) }
+                    }
+                }
+                Rectangle {
+                    width: 50 * root.density
+                    height: 50 * root.density
+                    radius: 10 * root.density
+                    color: "#161616"
+                    border.width: 1
+                    border.color: "#4a4a4a"
+                    Text { anchors.centerIn: parent; text: "⌫"; color: "#ffffff"; font.pixelSize: 23 * root.density; font.bold: true }
+                    MouseArea { anchors.fill: parent; onClicked: root.vkBackspace() }
+                }
+                Rectangle {
+                    width: 50 * root.density
+                    height: 50 * root.density
+                    radius: 10 * root.density
+                    color: "#161616"
+                    border.width: 1
+                    border.color: "#4a4a4a"
+                    Text { anchors.centerIn: parent; text: "×"; color: "#ffffff"; font.pixelSize: 20 * root.density; font.bold: true }
+                    MouseArea { anchors.fill: parent; onClicked: { name.focus = false; password.focus = false } }
+                }
+            }
+
+            Row {
+                width: parent.width
+                spacing: 6 * root.density
+
+                Rectangle {
+                    id: vk123
+                    width: 82 * root.density
+                    height: 52 * root.density
+                    radius: 10 * root.density
+                    color: "#151515"
+                    border.width: 1
+                    border.color: "#4a4a4a"
+                    Text { anchors.centerIn: parent; text: "123"; color: "#ffffff"; font.pixelSize: 18 * root.density; font.bold: true }
+                    MouseArea { anchors.fill: parent; onClicked: {} }
+                }
+                Rectangle {
+                    id: vkAt
+                    width: 48 * root.density
+                    height: 52 * root.density
+                    radius: 10 * root.density
+                    color: "#151515"
+                    border.width: 1
+                    border.color: "#4a4a4a"
+                    Text { anchors.centerIn: parent; text: "@"; color: "#ffffff"; font.pixelSize: 20 * root.density; font.bold: true }
+                    MouseArea { anchors.fill: parent; onClicked: root.vkAppend("@") }
+                }
+                Rectangle {
+                    id: vkDot
+                    width: 48 * root.density
+                    height: 52 * root.density
+                    radius: 10 * root.density
+                    color: "#151515"
+                    border.width: 1
+                    border.color: "#4a4a4a"
+                    Text { anchors.centerIn: parent; text: "."; color: "#ffffff"; font.pixelSize: 22 * root.density; font.bold: true }
+                    MouseArea { anchors.fill: parent; onClicked: root.vkAppend(".") }
+                }
+                Rectangle {
+                    id: vkDash
+                    width: 48 * root.density
+                    height: 52 * root.density
+                    radius: 10 * root.density
+                    color: "#151515"
+                    border.width: 1
+                    border.color: "#4a4a4a"
+                    Text { anchors.centerIn: parent; text: "-"; color: "#ffffff"; font.pixelSize: 22 * root.density; font.bold: true }
+                    MouseArea { anchors.fill: parent; onClicked: root.vkAppend("-") }
+                }
+                Rectangle {
+                    width: parent.width - (vk123.width + vkAt.width + vkDot.width + vkDash.width + vkLogin.width + parent.spacing * 5)
+                    height: 52 * root.density
+                    radius: 10 * root.density
+                    color: "#171717"
+                    border.width: 1
+                    border.color: "#4a4a4a"
+                    Text { anchors.centerIn: parent; text: "space"; color: "#ffffff"; font.pixelSize: 18 * root.density; font.bold: true }
+                    MouseArea { anchors.fill: parent; onClicked: root.vkAppend(" ") }
+                }
+                Rectangle {
+                    id: vkLogin
+                    width: 80 * root.density
+                    height: 52 * root.density
+                    radius: 10 * root.density
+                    color: "#101010"
+                    border.width: Math.max(1, Math.round(2 * root.density))
+                    border.color: "#ffffff"
+                    Text { anchors.centerIn: parent; text: "login"; color: "#ffffff"; font.pixelSize: 18 * root.density; font.bold: true }
+                    MouseArea { anchors.fill: parent; onClicked: sddm.login(name.text, password.text, sessionIndex) }
+                }
+            }
+        }
+    }
+
+    Row {
+        id: powerRow
+        x: root.margin
+        y: root.height - root.footerH - (14 * root.density)
+        width: root.width - (root.margin * 2)
+        height: root.footerH
+        spacing: 16 * root.density
+
+        Rectangle {
+            id: rebootBtn
+            width: (parent.width - parent.spacing) / 2
+            height: parent.height
+            radius: 18 * root.density
+            color: "#0b0b0b"
+            border.width: Math.max(1, Math.round(2 * root.density))
+            border.color: "#d8d8d8"
+
+            Text {
+                anchors.centerIn: parent
+                text: textConstants.reboot
+                color: "#ffffff"
+                font.pixelSize: 28 * root.density
+                font.bold: true
+            }
+
+            MouseArea {
+                anchors.fill: parent
+                onClicked: sddm.reboot()
+            }
+
+            KeyNavigation.backtab: loginBtn
+            KeyNavigation.tab: shutdownBtn
+        }
+
+        Rectangle {
+            id: shutdownBtn
+            width: (parent.width - parent.spacing) / 2
+            height: parent.height
+            radius: 18 * root.density
+            color: "#0b0b0b"
+            border.width: Math.max(1, Math.round(2 * root.density))
+            border.color: "#d8d8d8"
+
+            Text {
+                anchors.centerIn: parent
+                text: textConstants.shutdown
+                color: "#ffffff"
+                font.pixelSize: 28 * root.density
+                font.bold: true
+            }
+
+            MouseArea {
+                anchors.fill: parent
+                onClicked: sddm.powerOff()
+            }
+
+            KeyNavigation.backtab: rebootBtn
+            KeyNavigation.tab: name
+        }
+    }
+}
+EOF
+"""

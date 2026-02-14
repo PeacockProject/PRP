@@ -1,0 +1,25 @@
+[package]
+name = "busybox"
+version = "1.36.1"
+description = "Swiss Army Knife of Embedded Linux"
+
+[build]
+# Source URL for the tarball
+source = "https://busybox.net/downloads/busybox-1.36.1.tar.bz2"
+# Checksum for verification (SHA256)
+checksum = "b8cc24c9574d809e7279c3be349795c5d5ceb6fdf19ca709f80cde50e47de314"
+use_qemu = false
+cross_compile = "arm-linux-gnueabihf-"
+build_dep_packages = ["toolchain-arm-linux-gnueabihf", "make"]
+# Build steps
+script = """
+echo "Configuring Busybox..."
+make defconfig
+echo "Building Busybox (Static)..."
+# LDFLAGS=--static is key for portability in early initramfs
+MAKE_ARGS=""
+if [ -n "${CROSS_COMPILE:-}" ]; then
+  MAKE_ARGS="CROSS_COMPILE=${CROSS_COMPILE}"
+fi
+make $MAKE_ARGS LDFLAGS=--static -j$(nproc)
+"""

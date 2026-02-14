@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+export LD_LIBRARY_PATH="/sbin:/lib:/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+if [ -t 0 ] && [ -t 1 ] && [ "${PRP_LOGIN_BANNER_SHOWN:-0}" != "1" ]; then
+  export PRP_LOGIN_BANNER_SHOWN=1
+  if [ -x /usr/bin/prp-login-banner ]; then
+    /usr/bin/prp-login-banner || true
+  fi
+fi
+
+exec /bin/sh "$@"

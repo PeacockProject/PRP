@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+echo "PRP partition list:"
+for u in /sys/class/block/mmcblk0p*/uevent; do
+  [ -r "$u" ] || continue
+  dev="/dev/block/$(basename "$(dirname "$u")")"
+  partname="$(grep -m1 '^PARTNAME=' "$u" 2>/dev/null | cut -d= -f2- || true)"
+  size_sect="$(cat "$(dirname "$u")/size" 2>/dev/null || echo 0)"
+  size_mb=$((size_sect / 2048))
+  printf '%-16s %-20s %6sMB\n' "$(basename "$dev")" "${partname:-?}" "$size_mb"
+done
+

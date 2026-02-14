@@ -1,0 +1,15 @@
+[package]
+name = "msm-fb-refresher"
+version = "1.0.0"
+description = "Placeholder msm-fb-refresher package for Samsung Galaxy S4 (jflte)"
+
+[build]
+use_qemu = false
+cross_compile = "arm-linux-gnueabihf-"
+script = """
+mkdir -p stage/usr/bin
+cp refresher.c stage/usr/bin/refresher.c
+${CROSS_COMPILE:-}gcc -static -o stage/usr/bin/msm-fb-refresher refresher.c
+STRIP_BIN="${CROSS_COMPILE:-}strip"
+$STRIP_BIN -s stage/usr/bin/msm-fb-refresher 2>/dev/null || strip -s stage/usr/bin/msm-fb-refresher
+"""

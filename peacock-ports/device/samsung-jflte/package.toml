@@ -1,0 +1,37 @@
+[package]
+name = "device-samsung-jflte"
+version = "1.0.0"
+description = "Samsung Galaxy S4 (Qualcomm) Device Package"
+
+[build]
+dependencies = ["linux-firmware", "linux-samsung-jflte", "firmware-samsung-jflte", "msm-fb-refresher", "samsung-jflte-fbdev-compat", "samsung-jflte-fbdevhw-compat"]
+dependencies_systemd = ["base"]
+dependencies_openrc = [
+    "filesystem",
+    "glibc",
+    "bash",
+    "coreutils",
+    "util-linux",
+    "openrc",
+    "sysvinit-tools",
+    "procps-ng",
+    "grep",
+    "sed",
+    "gawk",
+    "tar",
+    "pacman",
+    "gcc-libs",
+    "shadow",
+    "psmisc",
+    "iproute2",
+    "iputils",
+    "inetutils",
+    "nano",
+    "dhcpcd",
+    "udev-openrc",
+    "xf86-input-evdev",
+    "peacock-splash",
+    "peacock-fb-logger",
+    "samsung-jflte-display-fix"
+]
+script = "echo 'Metapackage installed'"

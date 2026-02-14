@@ -1,0 +1,18 @@
+[package]
+name = "peacock-splash"
+version = "1.0.0"
+description = "Simple framebuffer splash screen utility for initramfs"
+
+[build]
+source = ""
+checksum = ""
+build_dep_packages = ["toolchain-arm-linux-gnueabihf"]
+use_qemu = false
+cross_compile = "arm-linux-gnueabihf-"
+script = """
+mkdir -p stage/usr/bin
+cp splash.c stage/usr/bin/splash.c
+${CROSS_COMPILE:-}gcc -static -o stage/usr/bin/peacock-splash splash.c -lm
+STRIP_BIN="${CROSS_COMPILE:-}strip"
+$STRIP_BIN -s stage/usr/bin/peacock-splash 2>/dev/null || strip -s stage/usr/bin/peacock-splash
+"""

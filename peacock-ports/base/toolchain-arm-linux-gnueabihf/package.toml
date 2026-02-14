@@ -1,0 +1,14 @@
+[package]
+name = "toolchain-arm-linux-gnueabihf"
+version = "7.5-2019.12"
+description = "Linaro GCC 7.5-2019.12 arm-linux-gnueabihf cross-compiler"
+
+[build]
+source = "https://releases.linaro.org/components/toolchain/binaries/7.5-2019.12/arm-linux-gnueabihf/gcc-linaro-7.5.0-2019.12-x86_64_arm-linux-gnueabihf.tar.xz"
+checksum = "" # TODO: fill with actual sha256
+script = """
+if [ ! -d bin ]; then
+  echo "Expected bin/ directory not found"
+  exit 1
+fi
+"""

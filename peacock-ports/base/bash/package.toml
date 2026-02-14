@@ -1,0 +1,26 @@
+[package]
+name = "bash"
+version = "5.3.9.1"
+description = "The GNU Bourne Again shell (Arch version)"
+provides = ["sh"]
+
+[build]
+source = "https://ftp.gnu.org/gnu/bash/bash-5.3.tar.gz"
+checksum = ""
+build_deps = ["gcc", "make", "bison", "ncurses", "awk", "grep", "sed"]
+script = """
+tarball="$(ls -1 bash-*.tar.gz 2>/dev/null | head -n1)"
+if [ -n "$tarball" ]; then
+  tar -xzf "$tarball" --strip-components=1
+fi
+./configure --prefix=/usr
+make -j4
+make install DESTDIR="$(pwd)/stage"
+# OpenRC and many base scripts require /bin/sh. Rootfs uses /bin -> /usr/bin.
+ln -sf bash stage/usr/bin/sh
+# Move to correct package structure
+# We want usr/bin/bash. DESTDIR/usr/bin/bash exists.
+cp -a stage/usr ./
+# Remove info/doc if needed, or keep.
+
+"""

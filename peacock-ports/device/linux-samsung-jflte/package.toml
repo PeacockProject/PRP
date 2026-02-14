@@ -1,0 +1,98 @@
+[package]
+name = "linux-samsung-jflte"
+version = "3.4.113.8"
+description = "Samsung Galaxy S4 kernel fork (LineageOS)"
+
+[build]
+# Source from LineageOS as used by pmbootstrap
+source = "https://github.com/LineageOS/android_kernel_samsung_jf/archive/0b7873d52c2331383f37eb908e54940eeac07345.tar.gz"
+checksum = "26475c4aeef1e105ccc53b17bc8e468300d28b6d442eee7f3f300806571c0bc6"
+build_dep_packages = ["toolchain-arm-eabi", "bash", "bc", "bison", "flex", "perl", "ncurses", "openssl", "gettext", "make"]
+use_qemu = false
+cross_compile = "arm-eabi-"
+
+# Build script (Real compilation)
+# Requires arm-none-eabi-gcc and make on host
+script = """
+echo "Copying config..."
+cp config .config
+
+echo "Applying netns compatibility patch..."
+patch -p1 < netns-compat.patch
+
+echo "Disabling downstream continuous splash path..."
+patch -p1 < disable-cont-splash.patch
+
+echo "Applying Samsung USB composite Kconfig compatibility patch..."
+patch -p1 < usb-samsung-composite-kconfig.patch
+
+echo "Compiling Kernel (Real)..."
+# Keep this build fully inside the chroot and avoid host toolchains.
+# We rely on ARCH (set by the builder) and only use CROSS_COMPILE if provided.
+perl - <<'PL'
+use strict;
+use warnings;
+
+my $path = "scripts/gcc-wrapper.py";
+exit 0 unless -f $path;
+
+open my $in, "<", $path or die $!;
+my @out;
+while (my $line = <$in>) {
+    chomp $line;
+    if ($line =~ /^(\\s*)print\\s*>>\\s*sys\\.stderr\\s*,\\s*(.*)$/) {
+        my ($indent, $expr) = ($1, $2);
+        $expr =~ s/\\s+$//;
+        if ($expr =~ s/,\\s*$//) {
+            $line = $indent . "print(" . $expr . ", end=' ', file=sys.stderr)";
+        } else {
+            $line = $indent . "print(" . $expr . ", file=sys.stderr)";
+        }
+    }
+    if ($line =~ /^\\s*interpret_warning\\(line\\)\\s*$/) {
+        $line =~ s/interpret_warning\\(line\\)/interpret_warning(line.decode(errors='replace') if isinstance(line, bytes) else line)/;
+    }
+    if ($line =~ /^if __name__ == '__main__':/) {
+        push @out, "def interpret_warning(line):";
+        push @out, "    return";
+    }
+    push @out, $line;
+}
+close $in;
+
+open my $outf, ">", $path or die $!;
+print $outf join("\\n", @out) . "\\n";
+PL
+MAKE_ARGS="ARCH=${ARCH:-arm} KCFLAGS=-Wno-error"
+if [ -n "${CROSS_COMPILE:-}" ]; then
+  MAKE_ARGS="$MAKE_ARGS CROSS_COMPILE=${CROSS_COMPILE}"
+fi
+JOBS="${PEACOCK_JOBS:-4}"
+if [ -z "$JOBS" ] || [ "$JOBS" -lt 1 ]; then
+  JOBS=1
+fi
+yes "" | make $MAKE_ARGS oldconfig
+make $MAKE_ARGS -j"$JOBS" zImage
+# Only build modules if they're enabled in the config
+if grep -q "^CONFIG_MODULES=y" .config 2>/dev/null; then
+  make $MAKE_ARGS -j"$JOBS" modules
+  rm -rf stage
+  mkdir -p stage
+  make $MAKE_ARGS modules_install INSTALL_MOD_PATH="$(pwd)/stage"
+else
+  echo "Modules disabled in config, skipping module build"
+  rm -rf stage
+  mkdir -p stage
+fi
+
+if [ ! -f "arch/arm/boot/zImage" ]; then
+    echo "Error: zImage not found after build!"
+    exit 1
+fi
+
+# Move artifact to root of build dir so builder finds it (mock expectation)
+cp arch/arm/boot/zImage zImage
+if [ -d "stage/lib/modules" ]; then
+  tar -czf modules.tar.gz -C stage lib/modules
+fi
+"""

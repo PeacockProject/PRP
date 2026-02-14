@@ -1,0 +1,41 @@
+#!/bin/sh
+set -eu
+
+print_motd() {
+  for p in \
+    /mnt/prp_rootfs/etc/prp/motd.txt \
+    /etc/prp/motd.txt \
+    /etc/motd; do
+    if [ -s "$p" ]; then
+      cat "$p"
+      return 0
+    fi
+  done
+  return 0
+}
+
+pick_motto() {
+  local seed idx up
+  seed="$(date +%s 2>/dev/null || echo 0)"
+  up=0
+  if [ -r /proc/uptime ]; then
+    up="$(cut -d. -f1 /proc/uptime 2>/dev/null || echo 0)"
+  fi
+  seed=$((seed + up + $$))
+  idx=$((seed % 8))
+  case "$idx" in
+    0) echo "Put it all on the line" ;;
+    1) echo "A series of dead ends" ;;
+    2) echo "Hush now" ;;
+    3) echo "Memories all plagued by the touch" ;;
+    4) echo "Crimson fate" ;;
+    5) echo "Let go" ;;
+    6) echo "Won't matter, fall or rise" ;;
+    *) echo "We needed a reason, fetch the gun, it's the season" ;;
+  esac
+}
+
+print_motd
+echo
+pick_motto
+printf '%s\n' '----------------------------------------'

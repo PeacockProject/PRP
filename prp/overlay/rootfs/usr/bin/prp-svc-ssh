@@ -1,0 +1,70 @@
+#!/bin/sh
+set -eu
+
+PORT="${PRP_SSH_PORT:-2222}"
+KEYDIR="${PRP_SSH_KEYDIR:-/etc/dropbear}"
+HOSTKEY="${KEYDIR}/dropbear_rsa_host_key"
+ALLOW_BLANK="${PRP_SSH_ALLOW_BLANK_PASSWORD:-1}"
+
+mkdir -p /etc "$KEYDIR" /root/.ssh /var/run
+mkdir -p /dev/pts /bin
+
+if [ ! -s /root/.ssh/authorized_keys ] && [ -s "${KEYDIR}/authorized_keys" ]; then
+  cp -f "${KEYDIR}/authorized_keys" /root/.ssh/authorized_keys 2>/dev/null || true
+fi
+chmod 0700 /root/.ssh 2>/dev/null || true
+chmod 0600 /root/.ssh/authorized_keys 2>/dev/null || true
+
+# Keep this standalone even when called from the GUI button directly.
+shell_path="/bin/sh"
+[ -x /usr/bin/prp-login-sh ] && shell_path="/usr/bin/prp-login-sh"
+if [ "$ALLOW_BLANK" = "1" ]; then
+  printf 'root::0:0:root:/root:%s\n' "$shell_path" > /etc/passwd
+else
+  printf 'root:x:0:0:root:/root:%s\n' "$shell_path" > /etc/passwd
+fi
+if [ ! -s /etc/group ]; then
+  echo 'root:x:0:' > /etc/group
+fi
+
+# Dropbear checks shell validity against /etc/shells.
+{
+  echo /bin/sh
+  echo /bin/ash
+  echo "$shell_path"
+} | awk '!seen[$0]++' > /etc/shells
+
+# Ensure an interactive shell is executable for SSH sessions.
+if [ ! -x /bin/sh ] && [ -x /sbin/busybox ]; then
+  ln -snf /sbin/busybox /bin/sh 2>/dev/null || true
+fi
+
+# Ensure PTY infrastructure exists (needed for interactive ssh shell/tty).
+if ! grep -q ' /dev/pts ' /proc/mounts 2>/dev/null; then
+  mount -t devpts devpts /dev/pts >/dev/null 2>&1 || true
+fi
+if [ ! -e /dev/ptmx ]; then
+  ln -snf /dev/pts/ptmx /dev/ptmx 2>/dev/null || mknod /dev/ptmx c 5 2 2>/dev/null || true
+fi
+
+if [ ! -s "$HOSTKEY" ]; then
+  if [ -x /usr/sbin/dropbearkey ]; then
+    /usr/sbin/dropbearkey -t rsa -s 2048 -f "$HOSTKEY" >/tmp/dropbearkey.log 2>&1 || true
+  fi
+fi
+if [ ! -s "$HOSTKEY" ]; then
+  echo "prp-svc-ssh: hostkey missing (see /tmp/dropbearkey.log)" >&2
+  exit 1
+fi
+
+killall dropbear >/dev/null 2>&1 || true
+args="-p $PORT -r $HOSTKEY"
+if [ "$ALLOW_BLANK" = "1" ]; then
+  # Allow password auth, and allow empty passwords (Dropbear -B).
+  args="$args -B"
+else
+  # Key-only.
+  args="$args -s"
+fi
+echo "prp-svc-ssh: port=$PORT blank=$ALLOW_BLANK shell=$shell_path" >&2
+exec /usr/sbin/dropbear $args

@@ -1,0 +1,40 @@
+[package]
+name = "perl"
+version = "5.42.0"
+description = "Highly capable, feature-rich programming language (Arch version)"
+
+[build]
+source = "https://www.cpan.org/src/5.0/perl-5.42.0.tar.xz"
+checksum = ""
+script = """
+tarball="$(ls -1 perl-*.tar.xz 2>/dev/null | head -n1)"
+if [ -n "$tarball" ]; then
+  tar -xJf "$tarball" --strip-components=1
+fi
+./Configure -des -Dprefix="/usr/local"
+make -j$(nproc)
+make install DESTDIR="$(pwd)/stage"
+if [ -d stage/usr/local ]; then
+  if [ -d stage/usr/local/bin ]; then
+    mkdir -p stage/bin
+    cp -a stage/usr/local/bin/. stage/bin/
+  fi
+  if [ -d stage/usr/local/lib ]; then
+    mkdir -p stage/lib
+    cp -a stage/usr/local/lib/. stage/lib/
+  fi
+  if [ -d stage/usr/local/include ]; then
+    mkdir -p stage/include
+    cp -a stage/usr/local/include/. stage/include/
+  fi
+  if [ -d stage/usr/local/share ]; then
+    mkdir -p stage/share
+    cp -a stage/usr/local/share/. stage/share/
+  fi
+  if [ -d stage/usr/local/man ]; then
+    mkdir -p stage/man
+    cp -a stage/usr/local/man/. stage/man/
+  fi
+  rm -rf stage/usr/local
+fi
+"""

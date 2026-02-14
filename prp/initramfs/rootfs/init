@@ -1,0 +1,1209 @@
+#!/sbin/busybox sh
+
+export PATH=/sbin:/bin:/usr/sbin:/usr/bin
+export LD_LIBRARY_PATH=/sbin:/lib:/usr/lib
+BB=/sbin/busybox
+PRP_OVERLAY_MOUNTED=0
+GUI_ACTIVE=0
+# When set to 0, never write log lines to the framebuffer (peacock-splash).
+# This is used to prevent fighting the GUI once it starts.
+FB_LOG_ENABLED=1
+FB_REFRESHER_STATE="unknown"
+ROOTFS_VERBOSE=1
+LOG_ROW=1
+LOG_ROW_MIN=1
+LOG_ROW_MAX=26
+USB_VERBOSE=0
+DO_MOUNT_SUBPARTS=1
+BUILD_TAG="@PRP_BUILD_TAG@"
+USB_TEST_MODE="rndis"
+START_ADBD=0
+START_TELNET=1
+START_TCPSVD_FALLBACK=1
+START_DHCPD=1
+RNDIS_ADDR="172.16.42.1/24"
+RNDIS_DHCP_START="172.16.42.20"
+RNDIS_DHCP_END="172.16.42.120"
+START_SSH=1
+SSH_PORT=22
+SSH_ALLOW_BLANK_PASSWORD=1
+SHELL_PORT=2323
+RAW_SHELL_PORT=2324
+
+log() {
+  local msg="PRP: $*"
+  echo "$msg"
+  echo "$msg" > /dev/console 2>/dev/null || true
+  echo "$msg" > /dev/tty0 2>/dev/null || true
+  echo "<6>$msg" > /dev/kmsg 2>/dev/null || true
+  # Append framebuffer lines without clearing/re-drawing the background.
+  # Once the GUI is running, stop writing to fb0 to avoid fighting the UI.
+  if [ "$FB_LOG_ENABLED" = "1" ] && [ "$GUI_ACTIVE" = "0" ] && [ -x /usr/bin/peacock-splash ] && [ -e /dev/fb0 ]; then
+    /usr/bin/peacock-splash "$msg" "$LOG_ROW" /dev/fb0 000000 noclear text=FFFFFF textmode >/dev/null 2>&1 || true
+    if [ "$LOG_ROW" -lt "$LOG_ROW_MAX" ]; then
+      LOG_ROW=$((LOG_ROW + 1))
+    fi
+  fi
+}
+
+vlog() {
+  [ "$USB_VERBOSE" = "1" ] || return 0
+  log "$@"
+}
+
+sys_write() {
+  local path="$1"
+  local value="$2"
+  [ -e "$path" ] || return 1
+  printf '%s' "$value" >"$path" 2>/dev/null || return 1
+  return 0
+}
+
+log_node() {
+  local n="$1"
+  if [ -e "$n" ]; then
+    log "$(basename "$n")=$(cat "$n" 2>/dev/null || echo '?')"
+  else
+    log "$(basename "$n")=missing"
+  fi
+}
+
+clear_fb_black() {
+  local vsize=""
+  local bpp=""
+  local stride=""
+  local x=""
+  local y=""
+  local line_bytes=0
+  local bytes=0
+  local blocks=0
+
+  [ -w /dev/fb0 ] || return 0
+  [ -r /sys/class/graphics/fb0/virtual_size ] || return 0
+
+  vsize="$(cat /sys/class/graphics/fb0/virtual_size 2>/dev/null || true)"
+  x="${vsize%,*}"
+  y="${vsize#*,}"
+  [ -n "$x" ] && [ -n "$y" ] || return 0
+
+  # Prefer kernel-provided stride if present; otherwise compute from x*bpp.
+  if [ -r /sys/class/graphics/fb0/stride ]; then
+    stride="$(cat /sys/class/graphics/fb0/stride 2>/dev/null || true)"
+  fi
+  if [ -n "$stride" ]; then
+    line_bytes="$stride"
+  else
+    [ -r /sys/class/graphics/fb0/bits_per_pixel ] || return 0
+    bpp="$(cat /sys/class/graphics/fb0/bits_per_pixel 2>/dev/null || true)"
+    [ -n "$bpp" ] || return 0
+    line_bytes=$((x * bpp / 8))
+  fi
+
+  bytes=$((line_bytes * y))
+  [ "$bytes" -gt 0 ] || return 0
+  blocks=$(((bytes + 4095) / 4096))
+  $BB dd if=/dev/zero of=/dev/fb0 bs=4096 count="$blocks" 2>/dev/null || true
+}
+
+mkdir -p /proc /sys /dev /run /tmp /etc /mnt/prp_boot /mnt/prp_root
+$BB mount -t proc proc /proc 2>/dev/null || true
+$BB mount -t sysfs sysfs /sys 2>/dev/null || true
+$BB mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
+$BB mount -t devpts devpts /dev/pts 2>/dev/null || true
+[ -c /dev/console ] || $BB mknod /dev/console c 5 1 2>/dev/null || true
+if [ -x /sbin/mdev ]; then
+  echo /sbin/mdev > /proc/sys/kernel/hotplug 2>/dev/null || true
+  /sbin/mdev -s >/dev/null 2>&1 || true
+fi
+
+find_prp_rootfs_dev() {
+  # Prefer filesystem label PRP_ROOTFS (ext* label), since it survives PIT changes.
+  local dev=""
+  local out=""
+  local lbl=""
+  local want="PRP_ROOTFS"
+  local hidden_dev=""
+
+  # Helpful debug: identify which mmcblk0pX is PARTNAME=HIDDEN.
+  for uevent in /sys/class/block/mmcblk0p*/uevent; do
+    [ -r "$uevent" ] || continue
+    if $BB grep -q '^PARTNAME=HIDDEN$' "$uevent" 2>/dev/null; then
+      hidden_dev="/dev/$(basename "$(dirname "$uevent")")"
+      break
+    fi
+  done
+
+  for dev in /dev/mmcblk0p* /dev/block/mmcblk0p*; do
+    [ -b "$dev" ] || continue
+    out="$($BB blkid "$dev" 2>/dev/null || true)"
+    case "$out" in
+      *"LABEL=\"$want\""*) echo "$dev"; return 0 ;;
+    esac
+
+    # Fallback: read ext(2/3/4) volume name from the superblock.
+    # Superblock is at +1024 bytes. Volume name field is at +120 bytes (16 bytes long).
+    # Absolute offset: 1144.
+    lbl="$($BB dd if="$dev" bs=1 skip=1144 count=16 2>/dev/null | $BB tr -d '\000' 2>/dev/null || true)"
+    [ "$lbl" = "$want" ] && { echo "$dev"; return 0; }
+  done
+
+  if [ "$ROOTFS_VERBOSE" = "1" ]; then
+    # Screen-friendly summary (avoid flooding the framebuffer log).
+    log "rootfs scan: hidden=${hidden_dev:-none}"
+    if [ -n "$hidden_dev" ] && [ -b "$hidden_dev" ]; then
+      out="$($BB blkid "$hidden_dev" 2>/dev/null || true)"
+      lbl="$($BB dd if="$hidden_dev" bs=1 skip=1144 count=16 2>/dev/null | $BB tr -d '\000' 2>/dev/null || true)"
+      log "rootfs scan: hidden blkid=${out:-none}"
+      log "rootfs scan: hidden extlabel=${lbl:-none}"
+    fi
+
+    # Full dump to a file for later inspection over RNDIS shell.
+    {
+      echo "=== PRP rootfs scan ==="
+      echo "build=${BUILD_TAG}"
+      echo "date=$($BB date -u 2>/dev/null || echo unknown)"
+      echo
+      echo "[dev nodes]"
+      $BB ls -la /dev/mmcblk0p* /dev/block/mmcblk0p* 2>/dev/null || true
+      echo
+      echo "[uevent]"
+      for uevent in /sys/class/block/mmcblk0p*/uevent; do
+        [ -r "$uevent" ] || continue
+        echo "--- $uevent ---"
+        $BB sed -n '1,40p' "$uevent" 2>/dev/null || true
+      done
+      echo
+      echo "[labels]"
+      for dev in /dev/mmcblk0p* /dev/block/mmcblk0p*; do
+        [ -b "$dev" ] || continue
+        out="$($BB blkid "$dev" 2>/dev/null || true)"
+        lbl="$($BB dd if="$dev" bs=1 skip=1144 count=16 2>/dev/null | $BB tr -d '\000' 2>/dev/null || true)"
+        echo "$dev blkid='${out}' extlabel='${lbl}'"
+      done
+      echo "=== end ==="
+    } > /tmp/prp-rootfs-scan.log 2>&1 || true
+    log "rootfs scan: wrote /tmp/prp-rootfs-scan.log"
+  fi
+
+  return 1
+}
+
+mount_prp_rootfs_overlay() {
+  local dev=""
+  local mnt="/mnt/prp_rootfs"
+  local tries=0
+
+  mkdir -p "$mnt"
+  # Recovery initramfs uses busybox+mdev, so block nodes can appear a bit later.
+  # Wait briefly for mmc partitions so we don't miss them during early boot.
+  while [ "$tries" -lt 15 ]; do
+    dev="$(find_prp_rootfs_dev 2>/dev/null || true)"
+    [ -n "$dev" ] && break
+    tries=$((tries + 1))
+    /sbin/mdev -s >/dev/null 2>&1 || true
+    $BB sleep 1
+  done
+  if [ -z "$dev" ]; then
+    log "prp_rootfs not found"
+    return 0
+  fi
+
+  # Try ext4/ext2 first (expected). If it fails, just report and continue boot.
+  $BB umount "$mnt" 2>/dev/null || true
+  if $BB mount -t ext4 -o rw "$dev" "$mnt" >/tmp/prp-rootfs-mount.log 2>&1 || \
+     $BB mount -t ext4 -o ro "$dev" "$mnt" >/tmp/prp-rootfs-mount.log 2>&1 || \
+     $BB mount -t ext2 -o rw "$dev" "$mnt" >/tmp/prp-rootfs-mount.log 2>&1; then
+    log "prp_rootfs mounted dev=$dev mnt=$mnt"
+  else
+    local merr=""
+    merr="$($BB head -n 1 /tmp/prp-rootfs-mount.log 2>/dev/null || true)"
+    [ -n "$merr" ] || merr="unknown"
+    log "prp_rootfs mount failed dev=$dev err=$merr"
+    return 0
+  fi
+  PRP_OVERLAY_MOUNTED=1
+
+  # Overlay large directories via bind mounts if present.
+  # Keep core initramfs (/sbin Android bionic bits, /init logic) untouched.
+  if [ -d "$mnt/usr" ]; then
+    mkdir -p /usr
+    $BB mount --bind "$mnt/usr" /usr 2>/dev/null || true
+  fi
+  if [ -d "$mnt/etc/dropbear" ]; then
+    mkdir -p /etc/dropbear
+    $BB mount --bind "$mnt/etc/dropbear" /etc/dropbear 2>/dev/null || true
+  fi
+  if [ -d "$mnt/root/.ssh" ]; then
+    mkdir -p /root/.ssh
+    $BB mount --bind "$mnt/root/.ssh" /root/.ssh 2>/dev/null || true
+  fi
+  if [ -d "$mnt/opt" ]; then
+    mkdir -p /opt
+    $BB mount --bind "$mnt/opt" /opt 2>/dev/null || true
+  fi
+  if [ -d "$mnt/var" ]; then
+    mkdir -p /var
+    $BB mount --bind "$mnt/var" /var 2>/dev/null || true
+  fi
+
+  # Extra PATH hooks if the partition provides additional tools.
+  if [ -d "$mnt/bin" ]; then
+    export PATH="$mnt/bin:$PATH"
+  fi
+  if [ -d "$mnt/sbin" ]; then
+    export PATH="$mnt/sbin:$PATH"
+  fi
+  if [ -d "$mnt/usr/bin" ]; then
+    export PATH="$mnt/usr/bin:$PATH"
+  fi
+  if [ -d "$mnt/usr/sbin" ]; then
+    export PATH="$mnt/usr/sbin:$PATH"
+  fi
+}
+
+start_overlay_gui() {
+  # GUI lives on PRP_ROOTFS overlay (bind-mounted at /usr).
+  [ "$PRP_OVERLAY_MOUNTED" = "1" ] || { vlog "gui skipped (no overlay)"; return 0; }
+  if [ -x /usr/bin/prp-gui ] && [ -e /dev/fb0 ]; then
+    # From this point on, the GUI is expected to own the framebuffer.
+    # Stop framebuffer logging and kill any lingering splash instances.
+    FB_LOG_ENABLED=0
+    if $BB pidof peacock-splash >/dev/null 2>&1; then
+      for p in $($BB pidof peacock-splash 2>/dev/null); do
+        $BB kill "$p" 2>/dev/null || true
+      done
+    fi
+
+    # Prefer a persistent config from PRP_ROOTFS if present.
+    local cfg="/mnt/prp_rootfs/etc/prp-gui.conf"
+    if [ -f "$cfg" ]; then
+      /usr/bin/prp-gui --config "$cfg" >/tmp/prp-gui.log 2>&1 &
+    else
+      /usr/bin/prp-gui >/tmp/prp-gui.log 2>&1 &
+    fi
+    $BB sleep 1
+    if $BB pidof prp-gui >/dev/null 2>&1; then
+      GUI_ACTIVE=1
+      log "gui started"
+    else
+      log "gui failed (see /tmp/prp-gui.log)"
+    fi
+  else
+    vlog "gui not present"
+  fi
+}
+
+draw_splash() {
+  if [ -x /usr/bin/peacock-splash ]; then
+    clear_fb_black
+    # Don't use "noclear" for the header: we want a deterministic black background
+    # regardless of what the boot chain left in the framebuffer.
+    /usr/bin/peacock-splash "PRP recovery" 0 /dev/fb0 000000 text=FFFFFF textmode >/dev/null 2>&1 || true
+    log "peacock-splash rendered (text-only)"
+  else
+    log "peacock-splash not present"
+  fi
+}
+
+start_fb_refresher() {
+  if [ -x /usr/bin/msm-fb-refresher ]; then
+    /usr/bin/msm-fb-refresher --loop >/dev/null 2>&1 &
+    FB_REFRESHER_STATE="started"
+  else
+    FB_REFRESHER_STATE="missing"
+  fi
+}
+
+start_fb_refresher
+draw_splash
+if [ "$FB_REFRESHER_STATE" = "started" ]; then
+  log "msm-fb-refresher started (loop)"
+elif [ "$FB_REFRESHER_STATE" = "missing" ]; then
+  log "msm-fb-refresher not present"
+fi
+
+# Overlay mount must happen early, before USB networking setup, so GUI/sshd/tools are ready.
+mount_prp_rootfs_overlay
+start_dropbear
+start_overlay_gui
+vlog "initramfs booted"
+log "build $BUILD_TAG"
+
+ensure_minimal_users() {
+  local pw="x"
+  local shell_path="/bin/sh"
+  mkdir -p /etc /root /root/.ssh /var/run
+  # In recovery mode we sometimes want SSH to "just work" even without keys.
+  # Dropbear checks /etc/passwd (shadow is disabled in our static build).
+  [ "${SSH_ALLOW_BLANK_PASSWORD:-0}" = "1" ] && pw=""
+  [ -x /usr/bin/prp-login-sh ] && shell_path="/usr/bin/prp-login-sh"
+  printf 'root:%s:0:0:root:/root:%s\n' "$pw" "$shell_path" > /etc/passwd
+  if [ ! -s /etc/group ]; then
+    cat > /etc/group <<'EOF'
+root:x:0:
+EOF
+  fi
+  # Some tools expect a known shell list.
+  cat > /etc/shells <<'EOF'
+/bin/sh
+/bin/ash
+EOF
+  if [ "$shell_path" != "/bin/sh" ]; then
+    printf '%s\n' "$shell_path" >> /etc/shells
+  fi
+}
+
+start_dropbear() {
+  [ "$START_SSH" = "1" ] || return 0
+  # sshd lives in PRP_ROOTFS overlay (/usr is bind-mounted) when present.
+  local svc="/usr/bin/prp-svc-ssh"
+  [ "$PRP_OVERLAY_MOUNTED" = "1" ] || { vlog "ssh skipped (no overlay)"; return 0; }
+  [ -x "$svc" ] || { log "ssh missing /usr/bin/prp-svc-ssh"; return 0; }
+  ensure_minimal_users
+  if [ ! -s /root/.ssh/authorized_keys ]; then
+    vlog "ssh: no authorized_keys (expected /root/.ssh/authorized_keys)"
+  fi
+
+  PRP_SSH_PORT="$SSH_PORT" PRP_SSH_ALLOW_BLANK_PASSWORD="${SSH_ALLOW_BLANK_PASSWORD:-0}" "$svc" >/tmp/prp-ssh.log 2>&1 &
+  $BB sleep 1
+  if $BB pidof dropbear >/dev/null 2>&1; then
+    log "ssh up :$SSH_PORT (ssh/scp root@${RNDIS_ADDR%/*})"
+  else
+    local err=""
+    err="$($BB head -n 1 /tmp/prp-ssh.log 2>/dev/null || true)"
+    [ -n "$err" ] || err="unknown"
+    log "ssh failed: $err"
+  fi
+}
+
+start_adbd_usb() {
+  local usb_base=""
+  local candidate=""
+  local state="unknown"
+  local final_funcs="?"
+  local final_enable="?"
+  local adbd_state="off"
+  local ep0_state="no"
+  local mode="${USB_TEST_MODE:-acm}"
+  local net_if=""
+  local net_if_lc=""
+  local p=""
+  local tries=""
+  local rndis_ip=""
+  local rndis_mask=""
+  local net_list=""
+  local shell_listen="0"
+  local shell_hex=""
+  local raw_shell_listen="0"
+  local raw_hex=""
+  local telsh="/tmp/telsh"
+  local rawsh="/tmp/rawsh"
+
+  log_node /sys/class/sec/switch/usb_state
+  vlog "usb device=$(cat /sys/class/sec/switch/device 2>/dev/null || echo missing)"
+
+  for candidate in \
+    /sys/class/android_usb/android0 \
+    /sys/devices/virtual/android_usb/android0 \
+    /sys/devices/virtual/usb_composite/*; do
+    if [ -d "$candidate" ] && [ -e "$candidate/enable" ] && [ -e "$candidate/functions" ]; then
+      usb_base="$candidate"
+      break
+    fi
+  done
+  vlog "usb_base=${usb_base:-none}"
+  if [ -z "$usb_base" ]; then
+    log "android_usb gadget path missing"
+    return 0
+  fi
+
+  mkdir -p /dev/socket
+  $BB chmod 0755 /dev/socket >/dev/null 2>&1 || true
+  sys_write "$usb_base/enable" 0 || true
+  sys_write "$usb_base/iManufacturer" "Peacock" || true
+  sys_write "$usb_base/iProduct" "PRP Recovery" || true
+  sys_write "$usb_base/iSerial" "PRP-JFLTE" || true
+
+  case "$mode" in
+    acm)
+      sys_write "$usb_base/idVendor" "04E8" || true
+      sys_write "$usb_base/idProduct" "6860" || true
+      sys_write "$usb_base/f_acm/acm_transports" "tty" || true
+      sys_write "$usb_base/functions" "acm" || true
+      ;;
+    acm_adb)
+      mkdir -p /dev/usb-ffs /dev/usb-ffs/adb
+      $BB chown 2000:2000 /dev/usb-ffs /dev/usb-ffs/adb >/dev/null 2>&1 || true
+      $BB chmod 0770 /dev/usb-ffs /dev/usb-ffs/adb >/dev/null 2>&1 || true
+      mountpoint -q /dev/usb-ffs/adb 2>/dev/null || $BB mount -t functionfs adb /dev/usb-ffs/adb -o uid=2000,gid=2000 >/dev/null 2>&1 || true
+      [ -e /dev/usb-ffs/adb/ep0 ] && ep0_state="yes"
+      sys_write "$usb_base/idVendor" "04E8" || true
+      sys_write "$usb_base/idProduct" "6860" || true
+      sys_write "$usb_base/f_acm/acm_transports" "tty" || true
+      sys_write "$usb_base/f_ffs/aliases" "adb" || true
+      sys_write "$usb_base/functions" "acm,adb" || true
+      if [ "${START_ADBD:-0}" = "1" ] && [ -x /sbin/adbd ]; then
+        ADB_TRACE=adb,usb /sbin/adbd --root_seclabel=u:r:su:s0 --device_banner=recovery >/tmp/adbd.log 2>&1 &
+        $BB sleep 1
+        $BB pidof adbd >/dev/null 2>&1 && adbd_state="running" || adbd_state="down"
+      fi
+      ;;
+    mtp)
+      sys_write "$usb_base/idVendor" "04E8" || true
+      sys_write "$usb_base/idProduct" "6860" || true
+      sys_write "$usb_base/functions" "mtp" || true
+      ;;
+    rndis)
+      sys_write "$usb_base/idVendor" "04E8" || true
+      sys_write "$usb_base/idProduct" "6863" || true
+      sys_write "$usb_base/f_rndis/wceis" "1" || true
+      sys_write "$usb_base/functions" "rndis" || true
+      ;;
+    adb|*)
+      mode="adb"
+      mkdir -p /dev/usb-ffs /dev/usb-ffs/adb
+      $BB chown 2000:2000 /dev/usb-ffs /dev/usb-ffs/adb >/dev/null 2>&1 || true
+      $BB chmod 0770 /dev/usb-ffs /dev/usb-ffs/adb >/dev/null 2>&1 || true
+      mountpoint -q /dev/usb-ffs/adb 2>/dev/null || $BB mount -t functionfs adb /dev/usb-ffs/adb -o uid=2000,gid=2000 >/dev/null 2>&1 || true
+      [ -e /dev/usb-ffs/adb/ep0 ] && ep0_state="yes"
+      sys_write "$usb_base/idVendor" "18D1" || true
+      sys_write "$usb_base/idProduct" "D001" || true
+      sys_write "$usb_base/f_ffs/aliases" "adb" || true
+      sys_write "$usb_base/functions" "adb" || true
+      if [ "${START_ADBD:-0}" = "1" ] && [ -x /sbin/adbd ]; then
+        ADB_TRACE=adb,usb /sbin/adbd --root_seclabel=u:r:su:s0 --device_banner=recovery >/tmp/adbd.log 2>&1 &
+        $BB sleep 1
+        $BB pidof adbd >/dev/null 2>&1 && adbd_state="running" || adbd_state="down"
+      fi
+      ;;
+  esac
+
+  /sbin/mdev -s >/dev/null 2>&1 || true
+  sys_write "$usb_base/enable" 1 || true
+  $BB sleep 1
+  [ -r "$usb_base/state" ] && state="$(cat "$usb_base/state" 2>/dev/null || echo unknown)"
+  [ -r "$usb_base/functions" ] && final_funcs="$(cat "$usb_base/functions" 2>/dev/null || echo '?')"
+  [ -r "$usb_base/enable" ] && final_enable="$(cat "$usb_base/enable" 2>/dev/null || echo '?')"
+
+  if [ "$mode" = "rndis" ]; then
+    net_list="$($BB ls /sys/class/net 2>/dev/null | $BB tr '\n' ',' | $BB sed 's/,$//')"
+    [ -n "$net_list" ] || net_list="none"
+    log "net class=$net_list"
+    for tries in 1 2 3 4 5 6 7 8 9 10; do
+      net_if=""
+      # Prefer gadget-style interface names first.
+      for p in usb0 USB0 rndis0 RNDIS0 eth0 ETH0; do
+        if [ -L "/sys/class/net/$p" ] || [ -d "/sys/class/net/$p" ]; then
+          net_if="$p"
+          break
+        fi
+      done
+      # Fallback: any non-loopback/non-sit tunnel interface.
+      if [ -z "$net_if" ]; then
+        for p in /sys/class/net/*; do
+          [ -L "$p" ] || [ -d "$p" ] || continue
+          net_if="$(basename "$p")"
+          net_if_lc="$($BB echo "$net_if" | $BB tr '[:upper:]' '[:lower:]')"
+          case "$net_if_lc" in
+            lo|sit*) net_if="" ;;
+          esac
+          [ -n "$net_if" ] && break
+        done
+      fi
+      [ -n "$net_if" ] && break
+      $BB sleep 1
+    done
+    rndis_ip="${RNDIS_ADDR%/*}"
+    rndis_mask="255.255.255.0"
+    if [ -n "$net_if" ]; then
+      $BB ip link set "$net_if" up >/dev/null 2>&1 || $BB ifconfig "$net_if" up >/dev/null 2>&1 || true
+      $BB ip addr flush dev "$net_if" >/dev/null 2>&1 || true
+      if ! $BB ip addr add "$RNDIS_ADDR" dev "$net_if" >/dev/null 2>&1; then
+        $BB ifconfig "$net_if" "$rndis_ip" netmask "$rndis_mask" up >/dev/null 2>&1 || true
+      fi
+      log "net if=$net_if ip=$RNDIS_ADDR"
+      if [ "$START_DHCPD" = "1" ]; then
+        $BB killall udhcpd >/dev/null 2>&1 || true
+        cat > /tmp/udhcpd.conf <<EOF
+start $RNDIS_DHCP_START
+end $RNDIS_DHCP_END
+interface $net_if
+option subnet $rndis_mask
+option router $rndis_ip
+option dns 1.1.1.1 8.8.8.8
+option lease 3600
+pidfile /tmp/udhcpd.pid
+lease_file /tmp/udhcpd.leases
+EOF
+        $BB udhcpd -f /tmp/udhcpd.conf >/tmp/udhcpd.log 2>&1 &
+        $BB sleep 1
+        if $BB pidof udhcpd >/dev/null 2>&1; then
+          log "dhcp $RNDIS_DHCP_START-$RNDIS_DHCP_END"
+        else
+          local derr=""
+          derr="$($BB head -n 1 /tmp/udhcpd.log 2>/dev/null || true)"
+          [ -n "$derr" ] || derr="unknown"
+          log "dhcp failed: $derr"
+        fi
+      fi
+    else
+      log "net if=none"
+    fi
+    if [ "$START_TELNET" = "1" ]; then
+      # Clear stale listeners before starting a fresh shell service.
+      $BB killall telnetd >/dev/null 2>&1 || true
+      $BB killall tcpsvd >/dev/null 2>&1 || true
+      cat > "$telsh" <<'EOF'
+#!/bin/sh
+export PATH=/sbin:/bin:/usr/sbin:/usr/bin
+export TERM=vt100
+exec /bin/sh -i 2>&1
+EOF
+      cat > "$rawsh" <<'EOF'
+#!/bin/sh
+export PATH=/sbin:/bin:/usr/sbin:/usr/bin
+export TERM=vt100
+echo "PRP cmd shell ready (one command per line, 'exit' to close)"
+while IFS= read -r line; do
+  [ -n "$line" ] || continue
+  [ "$line" = "exit" ] && break
+  /bin/sh -c "$line" 2>&1
+  echo "__PRP_EOC__"
+done
+EOF
+      $BB chmod 0755 "$telsh" >/dev/null 2>&1 || true
+      $BB chmod 0755 "$rawsh" >/dev/null 2>&1 || true
+
+      # Run a permanent supervised listener to survive one-shot/session-exit behavior.
+      (
+        while true; do
+          $BB telnetd -F -l "$telsh" -p "$SHELL_PORT" >/tmp/telnetd.log 2>&1 || true
+          $BB sleep 1
+        done
+      ) >/tmp/telnetd-supervisor.log 2>&1 &
+      $BB sleep 1
+      shell_hex="$($BB printf '%04X' "$SHELL_PORT")"
+      if $BB grep -qi ":$shell_hex .* 0A " /proc/net/tcp /proc/net/tcp6 2>/dev/null; then
+        shell_listen="1"
+        log "shell telnet-supervised :$SHELL_PORT"
+      else
+        local terr=""
+        terr="$($BB head -n 1 /tmp/telnetd.log 2>/dev/null || true)"
+        [ -n "$terr" ] || terr="unknown"
+        log "shell telnet failed: $terr"
+        if [ "$START_TCPSVD_FALLBACK" = "1" ]; then
+          $BB tcpsvd -vE 0.0.0.0 "$SHELL_PORT" /bin/sh >/tmp/tcpsvd.log 2>&1 &
+          $BB sleep 1
+          if $BB pidof tcpsvd >/dev/null 2>&1 || $BB grep -qi ":$shell_hex .* 0A " /proc/net/tcp /proc/net/tcp6 2>/dev/null; then
+            shell_listen="1"
+            log "shell tcpsvd :$SHELL_PORT"
+          else
+            local serr=""
+            serr="$($BB head -n 1 /tmp/tcpsvd.log 2>/dev/null || true)"
+            [ -n "$serr" ] || serr="unknown"
+            log "shell tcpsvd failed: $serr"
+          fi
+        fi
+      fi
+    fi
+    # Always provide a raw TCP shell endpoint as a more reliable fallback.
+    $BB killall tcpsvd >/dev/null 2>&1 || true
+    $BB tcpsvd -vE 0.0.0.0 "$RAW_SHELL_PORT" "$rawsh" >/tmp/tcpsvd-raw.log 2>&1 &
+    $BB sleep 1
+    raw_hex="$($BB printf '%04X' "$RAW_SHELL_PORT")"
+    if $BB pidof tcpsvd >/dev/null 2>&1 || $BB grep -qi ":$raw_hex .* 0A " /proc/net/tcp /proc/net/tcp6 2>/dev/null; then
+      raw_shell_listen="1"
+      log "shell raw :$RAW_SHELL_PORT"
+    else
+      local rerr=""
+      rerr="$($BB head -n 1 /tmp/tcpsvd-raw.log 2>/dev/null || true)"
+      [ -n "$rerr" ] || rerr="unknown"
+      log "shell raw failed: $rerr"
+    fi
+  fi
+
+  log "usb mode=$mode f=$final_funcs st=$state en=$final_enable ep0=$ep0_state sh=$shell_listen raw=$raw_shell_listen adbd=$adbd_state"
+  vlog "usb device=$(cat /sys/class/sec/switch/device 2>/dev/null || echo missing)"
+}
+
+start_adbd_usb
+
+resolve_userdata_dev() {
+  local p=""
+  local uevent=""
+  local dev=""
+  local node=""
+  for p in \
+    /dev/block/platform/*/by-name/USERDATA \
+    /dev/block/platform/*/by-name/userdata \
+    /dev/block/by-name/USERDATA \
+    /dev/block/by-name/userdata \
+    /dev/mmcblk0p29 \
+    /dev/mmcblk0p28 \
+    /dev/mmcblk0p30 \
+    /dev/block/mmcblk0p29 \
+    /dev/block/mmcblk0p28 \
+    /dev/block/mmcblk0p30; do
+    [ -e "$p" ] || continue
+    if [ -L "$p" ]; then
+      dev="$(readlink -f "$p" 2>/dev/null || true)"
+      [ -n "$dev" ] && [ -b "$dev" ] && {
+        echo "$dev"
+        return 0
+      }
+    elif [ -b "$p" ]; then
+      echo "$p"
+      return 0
+    fi
+  done
+
+  for uevent in /sys/class/block/mmcblk0p*/uevent; do
+    [ -r "$uevent" ] || continue
+    if $BB grep -qi '^PARTNAME=userdata$' "$uevent" 2>/dev/null; then
+      node="$(basename "$(dirname "$uevent")")"
+      dev="/dev/$node"
+      [ -b "$dev" ] && {
+        echo "$dev"
+        return 0
+      }
+      dev="/dev/block/$node"
+      [ -b "$dev" ] && {
+        echo "$dev"
+        return 0
+      }
+    fi
+  done
+  return 1
+}
+
+find_free_loop() {
+  local skip="${1:-}"
+  local l=""
+  local sys=""
+  # Prefer kernel-selected free loop when possible.
+  if $BB --list 2>/dev/null | $BB grep -qx losetup; then
+    l="$($BB losetup -f 2>/dev/null || true)"
+    if [ -n "$l" ] && [ "$l" != "$skip" ] && [ -b "$l" ]; then
+      echo "$l"
+      return 0
+    fi
+  fi
+  # Next, inspect loops that exist in sysfs.
+  for sys in /sys/class/block/loop*/loop/backing_file; do
+    [ -e "$sys" ] || continue
+    l="/dev/${sys%/loop/backing_file}"
+    l="${l##*/}"
+    l="/dev/$l"
+    [ -b "$l" ] || continue
+    [ "$l" = "$skip" ] && continue
+    if [ ! -s "$sys" ]; then
+      echo "$l"
+      return 0
+    fi
+  done
+  for l in /dev/loop0 /dev/loop1 /dev/loop2 /dev/loop3 /dev/loop4 /dev/loop5 /dev/loop6 /dev/loop7; do
+    [ -b "$l" ] || continue
+    [ "$l" = "$skip" ] && continue
+    sys="/sys/class/block/${l##*/}/loop/backing_file"
+    if [ ! -e "$sys" ] || [ ! -s "$sys" ]; then
+      echo "$l"
+      return 0
+    fi
+  done
+  return 1
+}
+
+loop_attach_labeled() {
+  local loopdev="$1"
+  local backing="$2"
+  local off_bytes="$3"
+  local off_alt="$4"
+  local expect_label="$5"
+  local logf="$6"
+  local off=""
+  local blk=""
+  local magic=""
+  local raw_magic=""
+  local derr=""
+
+  for off in "$off_bytes" "$off_alt"; do
+    [ -n "$off" ] || continue
+    $BB losetup -d "$loopdev" >/dev/null 2>&1 || true
+    if ! $BB losetup -o "$off" "$loopdev" "$backing" >>"$logf" 2>&1; then
+      echo "loop_attach $loopdev off=$off failed" >> "$logf"
+      continue
+    fi
+    raw_magic="$($BB dd if="$backing" bs=1 skip=$((off + 1080)) count=2 2>/tmp/prp-dd.raw.err | $BB hexdump -v -e '1/1 \"%02x\"' 2>/dev/null || true)"
+    derr="$($BB cat /tmp/prp-dd.raw.err 2>/dev/null || true)"
+    echo "loop_attach backing_probe off=$off raw_magic=${raw_magic:-none} raw_err=${derr:-none}" >> "$logf"
+    blk="$($BB blkid "$loopdev" 2>/dev/null || true)"
+    magic="$($BB dd if="$loopdev" bs=1 skip=1080 count=2 2>/tmp/prp-dd.loop.err | $BB hexdump -v -e '1/1 \"%02x\"' 2>/dev/null || true)"
+    derr="$($BB cat /tmp/prp-dd.loop.err 2>/dev/null || true)"
+    echo "loop_attach $loopdev off=$off blkid=${blk:-none} sb_magic=${magic:-none} loop_err=${derr:-none}" >> "$logf"
+    $BB losetup -a >>"$logf" 2>&1 || true
+    log_loop_state "$loopdev" "loop_attach_state" "$logf"
+    case "$blk" in
+      *"LABEL=\"$expect_label\""*) return 0 ;;
+    esac
+  done
+  $BB losetup -d "$loopdev" >/dev/null 2>&1 || true
+  return 1
+}
+
+log_loop_state() {
+  local loopdev="$1"
+  local tag="$2"
+  local name="${loopdev##*/}"
+  local bf=""
+  local off=""
+  local lim=""
+  local sz=""
+  [ -b "$loopdev" ] || return 0
+  bf="$($BB cat "/sys/class/block/$name/loop/backing_file" 2>/dev/null || true)"
+  off="$($BB cat "/sys/class/block/$name/loop/offset" 2>/dev/null || true)"
+  lim="$($BB cat "/sys/class/block/$name/loop/sizelimit" 2>/dev/null || true)"
+  sz="$($BB cat "/sys/class/block/$name/size" 2>/dev/null || true)"
+  echo "$tag loop=$loopdev backing=${bf:-none} offset=${off:-none} sizelimit=${lim:-none} sectors=${sz:-none}" >> "$3"
+}
+
+ensure_block_node() {
+  local node_name="$1"
+  local devspec=""
+  local maj=""
+  local min=""
+  [ -n "$node_name" ] || return 1
+  [ -b "/dev/$node_name" ] && {
+    echo "/dev/$node_name"
+    return 0
+  }
+  devspec="$($BB cat "/sys/class/block/$node_name/dev" 2>/dev/null || true)"
+  case "$devspec" in
+    *:*)
+      maj="${devspec%:*}"
+      min="${devspec#*:}"
+      $BB mknod "/dev/$node_name" b "$maj" "$min" 2>/dev/null || true
+      ;;
+  esac
+  [ -b "/dev/$node_name" ] && {
+    echo "/dev/$node_name"
+    return 0
+  }
+  return 1
+}
+
+mount_subparts() {
+  local userdata_dev="${1:-}"
+  local boot_start=2048
+  local root_start=1050624
+  local boot_span_sectors=$((root_start - boot_start))
+  local boot_off
+  local root_off
+  local boot_size_bytes=0
+  local root_size_bytes=0
+  local total_sectors=""
+  local sect_path=""
+  local gpt_sig=""
+  local has_gpt=0
+  local logic_bs=""
+  local phys_bs=""
+  local boot_sb_magic=""
+  local root_sb_magic=""
+  local losetup_has_sizelimit=0
+  local logf="/tmp/prp-subparts.log"
+  local boot_loop=""
+  local root_loop=""
+  local boot_src=""
+  local root_src=""
+  local boot_magic=""
+  local main_loop=""
+  local main_p1=""
+  local main_p2=""
+  local base=""
+  local boot_mounted=0
+  local root_mounted=0
+  local ptries=0
+  local root_off_alt="$root_start"
+  local boot_off_alt="$boot_start"
+  local loop_backing=""
+  local cand=""
+  local dmsetup_cmd=""
+  local dm_boot_name="prp_peacock_boot"
+  local dm_root_name="prp_peacock_root"
+  local dm_boot_dev=""
+  local dm_root_dev=""
+  local root_span_sectors=0
+  local fdisk_cmd=""
+  local fdisk_boot_start=""
+  local fdisk_boot_sectors=""
+  local fdisk_root_start=""
+  local fdisk_root_sectors=""
+  local fdisk_line=""
+
+  mkdir -p /tmp /mnt/prp_boot /mnt/prp_root
+  {
+    echo "=== prp subparts ==="
+    echo "build=$BUILD_TAG"
+    echo "date=$($BB date -u 2>/dev/null || echo unknown)"
+  } > "$logf"
+
+  if [ -z "$userdata_dev" ]; then
+    userdata_dev="$(resolve_userdata_dev 2>/dev/null || true)"
+  fi
+  if [ -z "$userdata_dev" ]; then
+    for base in /dev/mmcblk0p29 /dev/block/mmcblk0p29 /dev/mmcblk0p28 /dev/block/mmcblk0p28; do
+      if [ -b "$base" ]; then
+        userdata_dev="$base"
+        break
+      fi
+    done
+  fi
+
+  sect_path="/sys/class/block/${userdata_dev##*/}/size"
+  if [ -r "$sect_path" ]; then
+    total_sectors="$($BB cat "$sect_path" 2>/dev/null || true)"
+    case "$total_sectors" in
+      ''|*[!0-9]*) total_sectors="" ;;
+    esac
+  fi
+  if $BB losetup --help 2>&1 | $BB grep -q -- ' -S '; then
+    losetup_has_sizelimit=1
+  fi
+
+  echo "userdata_dev=${userdata_dev:-none}" >> "$logf"
+  echo "losetup_sizelimit=$losetup_has_sizelimit total_sectors=${total_sectors:-unknown}" >> "$logf"
+  if [ ! -b "$userdata_dev" ]; then
+    echo "userdata block device missing" >> "$logf"
+    $BB ls -la /dev/mmcblk0p* /dev/block/mmcblk0p* >> "$logf" 2>&1 || true
+    log "userdata device not found: ${userdata_dev:-none}"
+    return 1
+  fi
+
+  gpt_sig="$($BB dd if="$userdata_dev" bs=1 skip=512 count=8 2>/dev/null || true)"
+  if [ "$gpt_sig" = "EFI PART" ]; then
+    has_gpt=1
+  fi
+  logic_bs="$($BB cat "/sys/class/block/${userdata_dev##*/}/queue/logical_block_size" 2>/dev/null || true)"
+  phys_bs="$($BB cat "/sys/class/block/${userdata_dev##*/}/queue/physical_block_size" 2>/dev/null || true)"
+  echo "gpt_sig=${gpt_sig:-none} has_gpt=$has_gpt" >> "$logf"
+  echo "logical_block_size=${logic_bs:-unknown} physical_block_size=${phys_bs:-unknown}" >> "$logf"
+  if [ "$has_gpt" != "1" ]; then
+    log "userdata is not peacock GPT image: $userdata_dev"
+    return 1
+  fi
+
+  # Dynamic partition offsets from the nested GPT image when available.
+  # Keep constants as fallback for compatibility.
+  for cand in /sbin/fdisk /usr/sbin/fdisk /usr/bin/fdisk /bin/fdisk; do
+    [ -x "$cand" ] || continue
+    fdisk_cmd="$cand"
+    break
+  done
+  echo "fdisk_cmd=${fdisk_cmd:-none}" >> "$logf"
+  if [ -n "$fdisk_cmd" ]; then
+    fdisk_line="$(LD_LIBRARY_PATH=/sbin:/lib:/usr/lib "$fdisk_cmd" -l "$userdata_dev" 2>/tmp/prp-fdisk.err | $BB awk -v d="$userdata_dev" '$1==d"p1"{print $2" "$4; exit}' || true)"
+    set -- $fdisk_line
+    case "${1:-}:${2:-}" in
+      [0-9]*:[0-9]*)
+        fdisk_boot_start="$1"
+        fdisk_boot_sectors="$2"
+        ;;
+    esac
+    fdisk_line="$(LD_LIBRARY_PATH=/sbin:/lib:/usr/lib "$fdisk_cmd" -l "$userdata_dev" 2>/tmp/prp-fdisk.err | $BB awk -v d="$userdata_dev" '$1==d"p2"{print $2" "$4; exit}' || true)"
+    set -- $fdisk_line
+    case "${1:-}:${2:-}" in
+      [0-9]*:[0-9]*)
+        fdisk_root_start="$1"
+        fdisk_root_sectors="$2"
+        ;;
+    esac
+  fi
+
+  if [ -n "$fdisk_boot_start" ] && [ -n "$fdisk_boot_sectors" ] && [ -n "$fdisk_root_start" ] && [ -n "$fdisk_root_sectors" ]; then
+    boot_start="$fdisk_boot_start"
+    boot_span_sectors="$fdisk_boot_sectors"
+    root_start="$fdisk_root_start"
+    root_span_sectors="$fdisk_root_sectors"
+    echo "layout_source=fdisk p1_start=$boot_start p1_sectors=$boot_span_sectors p2_start=$root_start p2_sectors=$root_span_sectors" >> "$logf"
+  else
+    echo "layout_source=default p1_start=$boot_start p2_start=$root_start" >> "$logf"
+  fi
+
+  boot_off=$((boot_start * 512))
+  root_off=$((root_start * 512))
+  boot_size_bytes=$((boot_span_sectors * 512))
+  if [ -n "$root_span_sectors" ] && [ "$root_span_sectors" -gt 0 ]; then
+    root_size_bytes=$((root_span_sectors * 512))
+  elif [ -n "$total_sectors" ] && [ "$total_sectors" -gt "$root_start" ]; then
+    root_size_bytes=$(((total_sectors - root_start) * 512))
+  fi
+  boot_sb_magic="$($BB dd if="$userdata_dev" bs=1 skip=$((boot_off + 1080)) count=2 2>/dev/null | $BB hexdump -v -e '1/1 "%02x"' 2>/dev/null || true)"
+  root_sb_magic="$($BB dd if="$userdata_dev" bs=1 skip=$((root_off + 1080)) count=2 2>/dev/null | $BB hexdump -v -e '1/1 "%02x"' 2>/dev/null || true)"
+  echo "boot_off=$boot_off root_off=$root_off" >> "$logf"
+  echo "boot_size_bytes=$boot_size_bytes root_size_bytes=${root_size_bytes:-0}" >> "$logf"
+  echo "boot_sb_magic=${boot_sb_magic:-none} root_sb_magic=${root_sb_magic:-none}" >> "$logf"
+
+  $BB umount /mnt/prp_boot 2>/dev/null || true
+  $BB umount /mnt/prp_root 2>/dev/null || true
+  rm -f "${userdata_dev}s0" "${userdata_dev}s1" /dev/mmcblk0p29s0 /dev/mmcblk0p29s1 \
+    /dev/block/mmcblk0p29s0 /dev/block/mmcblk0p29s1 2>/dev/null || true
+
+  # Try kernel-native nested-partition exposure first (no loop-on-block required).
+  if $BB --list 2>/dev/null | $BB grep -qx partprobe; then
+    $BB partprobe "$userdata_dev" >>"$logf" 2>&1 || true
+  fi
+  if $BB --list 2>/dev/null | $BB grep -qx blockdev; then
+    $BB blockdev --rereadpt "$userdata_dev" >>"$logf" 2>&1 || true
+  fi
+  while [ "$ptries" -lt 4 ]; do
+    /sbin/mdev -s >/dev/null 2>&1 || true
+    [ -z "$boot_src" ] && {
+      for base in \
+        "${userdata_dev}p1" "${userdata_dev}s0" \
+        "/dev/${userdata_dev##*/}p1" "/dev/${userdata_dev##*/}s0" \
+        "/dev/block/${userdata_dev##*/}p1" "/dev/block/${userdata_dev##*/}s0"; do
+        [ -b "$base" ] || continue
+        boot_src="$base"
+        break
+      done
+    }
+    [ -z "$root_src" ] && {
+      for base in \
+        "${userdata_dev}p2" "${userdata_dev}s1" \
+        "/dev/${userdata_dev##*/}p2" "/dev/${userdata_dev##*/}s1" \
+        "/dev/block/${userdata_dev##*/}p2" "/dev/block/${userdata_dev##*/}s1"; do
+        [ -b "$base" ] || continue
+        root_src="$base"
+        break
+      done
+    }
+    [ -n "$boot_src" ] && [ -n "$root_src" ] && break
+    ptries=$((ptries + 1))
+    $BB sleep 1
+  done
+  [ -n "$boot_src" ] && echo "kernel_subpart boot=$boot_src" >> "$logf"
+  [ -n "$root_src" ] && echo "kernel_subpart root=$root_src" >> "$logf"
+
+  # Preferred fallback on this kernel: device-mapper linear mappings.
+  # This avoids loop-on-block I/O errors seen on jflte recovery kernels.
+  for cand in /sbin/dmsetup /usr/sbin/dmsetup /usr/bin/dmsetup /bin/dmsetup; do
+    [ -x "$cand" ] || continue
+    dmsetup_cmd="$cand"
+    break
+  done
+  echo "dmsetup_cmd=${dmsetup_cmd:-none}" >> "$logf"
+  if [ -n "$dmsetup_cmd" ] && { [ -z "$boot_src" ] || [ -z "$root_src" ]; }; then
+    if [ -n "$total_sectors" ] && [ "$total_sectors" -gt "$root_start" ]; then
+      if [ -z "$root_span_sectors" ] || [ "$root_span_sectors" -le 0 ]; then
+        root_span_sectors=$((total_sectors - root_start))
+      fi
+      "$dmsetup_cmd" remove -f "$dm_boot_name" >>"$logf" 2>&1 || true
+      "$dmsetup_cmd" remove -f "$dm_root_name" >>"$logf" 2>&1 || true
+      echo "dm_boot_table=0 $boot_span_sectors linear $userdata_dev $boot_start" >> "$logf"
+      if echo "0 $boot_span_sectors linear $userdata_dev $boot_start" | "$dmsetup_cmd" create "$dm_boot_name" >>"$logf" 2>&1; then
+        "$dmsetup_cmd" mknodes >>"$logf" 2>&1 || true
+        dm_boot_dev="/dev/mapper/$dm_boot_name"
+        [ -b "$dm_boot_dev" ] || dm_boot_dev=""
+      fi
+      echo "dm_root_table=0 $root_span_sectors linear $userdata_dev $root_start" >> "$logf"
+      if echo "0 $root_span_sectors linear $userdata_dev $root_start" | "$dmsetup_cmd" create "$dm_root_name" >>"$logf" 2>&1; then
+        "$dmsetup_cmd" mknodes >>"$logf" 2>&1 || true
+        dm_root_dev="/dev/mapper/$dm_root_name"
+        [ -b "$dm_root_dev" ] || dm_root_dev=""
+      fi
+      [ -n "$dm_boot_dev" ] && [ -z "$boot_src" ] && {
+        boot_src="$dm_boot_dev"
+        echo "dm_boot_dev=$dm_boot_dev" >> "$logf"
+      }
+      [ -n "$dm_root_dev" ] && [ -z "$root_src" ] && {
+        root_src="$dm_root_dev"
+        echo "dm_root_dev=$dm_root_dev" >> "$logf"
+      }
+    else
+      echo "dmsetup skipped: invalid total_sectors=${total_sectors:-none}" >> "$logf"
+    fi
+  fi
+
+  # Preferred: kernel-partitioned loop mapping (gives loopXp1/loopXp2 directly).
+  if { [ -z "$boot_src" ] || [ -z "$root_src" ]; } && $BB --list 2>/dev/null | $BB grep -qx losetup; then
+    main_loop="$(find_free_loop 2>/dev/null || true)"
+    if [ -n "$main_loop" ]; then
+      $BB losetup -d "$main_loop" >/dev/null 2>&1 || true
+      if $BB losetup -P "$main_loop" "$userdata_dev" >>"$logf" 2>&1; then
+        # Some kernels ignore -P during setup; force a re-read on loop itself.
+        if $BB --list 2>/dev/null | $BB grep -qx partprobe; then
+          $BB partprobe "$main_loop" >>"$logf" 2>&1 || true
+        fi
+        if $BB --list 2>/dev/null | $BB grep -qx blockdev; then
+          $BB blockdev --rereadpt "$main_loop" >>"$logf" 2>&1 || true
+        fi
+        # Wait briefly and ensure /dev nodes for loop partitions exist.
+        ptries=0
+        while [ "$ptries" -lt 4 ]; do
+          /sbin/mdev -s >/dev/null 2>&1 || true
+          cand="$(ensure_block_node "${main_loop##*/}p1" 2>/dev/null || true)"
+          [ -n "$cand" ] && main_p1="$cand"
+          cand="$(ensure_block_node "${main_loop##*/}p2" 2>/dev/null || true)"
+          [ -n "$cand" ] && main_p2="$cand"
+          [ -n "$main_p1" ] && [ -n "$main_p2" ] && break
+          ptries=$((ptries + 1))
+          $BB sleep 1
+        done
+        if [ -n "$main_p1" ] && [ -b "$main_p1" ]; then
+          boot_src="$main_p1"
+          echo "main_loop boot=$boot_src" >> "$logf"
+        fi
+        if [ -n "$main_p2" ] && [ -b "$main_p2" ]; then
+          root_src="$main_p2"
+          echo "main_loop root=$root_src" >> "$logf"
+        fi
+        $BB losetup -a >>"$logf" 2>&1 || true
+        log_loop_state "$main_loop" "main_loop_state" "$logf"
+      else
+        echo "losetup -P failed on $main_loop" >> "$logf"
+        main_loop=""
+      fi
+    else
+      echo "no free loop for losetup -P" >> "$logf"
+    fi
+  fi
+
+  # Fallback: explicit loops at fixed offsets.
+  # Use only for mounting; aliases remain reserved for accurate loopXp1/loopXp2.
+  if $BB --list 2>/dev/null | $BB grep -qx losetup; then
+    if [ -z "$boot_src" ] || [ -z "$root_src" ]; then
+      # Prefer raw userdata backing; loop-on-loop is unreliable on this kernel.
+      loop_backing="$userdata_dev"
+      echo "loop_backing=$loop_backing" >> "$logf"
+      # Map root first (required), boot second (optional).
+      if [ -z "$root_src" ]; then
+        root_loop="$(find_free_loop "$main_loop" 2>/dev/null || true)"
+        if [ -n "$root_loop" ]; then
+          if loop_attach_labeled "$root_loop" "$loop_backing" "$root_off" "$root_off_alt" "ROOT" "$logf"; then
+            root_src="$root_loop"
+            echo "root_loop=$root_loop" >> "$logf"
+            log_loop_state "$root_loop" "root_loop_state" "$logf"
+          else
+            root_loop=""
+          fi
+        fi
+      fi
+      if [ -z "$boot_src" ]; then
+        boot_loop="$(find_free_loop "$root_loop" 2>/dev/null || true)"
+        if [ -n "$boot_loop" ] && [ "$boot_loop" != "$main_loop" ]; then
+          if loop_attach_labeled "$boot_loop" "$loop_backing" "$boot_off" "$boot_off_alt" "BOOT" "$logf"; then
+            boot_src="$boot_loop"
+            echo "boot_loop=$boot_loop" >> "$logf"
+            log_loop_state "$boot_loop" "boot_loop_state" "$logf"
+          else
+            boot_loop=""
+          fi
+        fi
+      fi
+      if [ -z "$root_src" ] && [ -z "$boot_src" ]; then
+        echo "no usable loop devices for fixed-offset subparts" >> "$logf"
+      fi
+    fi
+  else
+    echo "busybox losetup applet missing; using implicit loop mounts" >>"$logf"
+  fi
+
+  # Create aliases from discovered partition mappings.
+  for base in "$userdata_dev" "/dev/mmcblk0p29" "/dev/block/mmcblk0p29"; do
+    [ -n "$base" ] || continue
+    [ -e "$base" ] || continue
+    [ -n "$boot_src" ] && [ -b "$boot_src" ] && ln -snf "$boot_src" "${base}s0" 2>/dev/null || true
+    [ -n "$root_src" ] && [ -b "$root_src" ] && ln -snf "$root_src" "${base}s1" 2>/dev/null || true
+  done
+
+  if [ -n "$boot_src" ]; then
+    boot_magic="$($BB dd if="$boot_src" bs=8 count=1 2>/dev/null || true)"
+    [ -n "$boot_magic" ] && echo "boot_magic=$boot_magic" >> "$logf"
+    if $BB mount -t ext2 -o ro "$boot_src" /mnt/prp_boot >>"$logf" 2>&1 || \
+       $BB mount -t ext4 -o ro "$boot_src" /mnt/prp_boot >>"$logf" 2>&1; then
+      boot_mounted=1
+    fi
+  fi
+  if [ "$boot_mounted" -ne 1 ]; then
+    if $BB mount -t ext2 -o ro,loop,offset="$boot_off" "$userdata_dev" /mnt/prp_boot >>"$logf" 2>&1 || \
+       $BB mount -t ext4 -o ro,loop,offset="$boot_off" "$userdata_dev" /mnt/prp_boot >>"$logf" 2>&1; then
+      boot_mounted=1
+      boot_src="$($BB awk '$2==\"/mnt/prp_boot\"{print $1}' /proc/mounts 2>/dev/null | $BB head -n1 || true)"
+    fi
+  fi
+  if [ -n "$root_src" ]; then
+    if $BB mount -t ext4 -o rw "$root_src" /mnt/prp_root >>"$logf" 2>&1 || \
+       $BB mount -t ext4 -o ro "$root_src" /mnt/prp_root >>"$logf" 2>&1 || \
+       $BB mount -t ext4 -o ro,noload "$root_src" /mnt/prp_root >>"$logf" 2>&1 || \
+       $BB mount -t ext2 -o ro "$root_src" /mnt/prp_root >>"$logf" 2>&1; then
+      root_mounted=1
+    fi
+  fi
+
+  # Offset fallback if explicit loop mapping didn't mount.
+  if [ "$root_mounted" -ne 1 ]; then
+    if $BB mount -t ext4 -o rw,loop,offset="$root_off" "$userdata_dev" /mnt/prp_root >>"$logf" 2>&1 || \
+       $BB mount -t ext4 -o ro,loop,offset="$root_off" "$userdata_dev" /mnt/prp_root >>"$logf" 2>&1 || \
+       $BB mount -t ext4 -o ro,noload,loop,offset="$root_off" "$userdata_dev" /mnt/prp_root >>"$logf" 2>&1 || \
+       $BB mount -t ext2 -o ro,loop,offset="$root_off" "$userdata_dev" /mnt/prp_root >>"$logf" 2>&1; then
+      root_mounted=1
+      root_src="$($BB awk '$2==\"/mnt/prp_root\"{print $1}' /proc/mounts 2>/dev/null | $BB head -n1 || true)"
+    fi
+  fi
+
+  if [ "$root_mounted" -eq 1 ]; then
+    log "mounted subpartitions from $userdata_dev"
+    if [ "$boot_mounted" -eq 1 ]; then
+      log "subpart aliases: ${userdata_dev}s0 -> ${boot_src:-none}, ${userdata_dev}s1 -> ${root_src:-none}"
+    else
+      log "subpart root mounted; boot partition mount skipped/failed"
+      log "subpart alias: ${userdata_dev}s1 -> ${root_src:-none}"
+    fi
+    log "subpart log: $logf"
+    return 0
+  fi
+  # Clean up failed dm mappings to avoid stale devices across retries.
+  if [ -n "$dmsetup_cmd" ]; then
+    "$dmsetup_cmd" remove -f "$dm_boot_name" >>"$logf" 2>&1 || true
+    "$dmsetup_cmd" remove -f "$dm_root_name" >>"$logf" 2>&1 || true
+  fi
+  log "subpartition mount failed (see $logf)"
+  return 1
+}
+
+if [ "$DO_MOUNT_SUBPARTS" = "1" ]; then
+  mount_subparts || log "subpartition mount failed"
+fi
+
+start_tty_shell() {
+  local tty="$1"
+  [ -c "$tty" ] || return 0
+  if command -v setsid >/dev/null 2>&1 && command -v cttyhack >/dev/null 2>&1; then
+    setsid cttyhack /bin/sh <"$tty" >"$tty" 2>&1 &
+  else
+    /bin/sh <"$tty" >"$tty" 2>&1 &
+  fi
+  vlog "started rescue shell on $tty"
+}
+
+start_tty_shell /dev/tty0
+start_tty_shell /dev/tty1
+start_tty_shell /dev/ttyS0
+
+echo
+echo "PRP shell ready."
+echo "Useful paths:"
+echo "  /mnt/prp_boot"
+echo "  /mnt/prp_root"
+echo "Utilities:"
+echo "  busybox applets in /bin + adbd + tty rescue shells"
+echo
+
+# Keep PID 1 alive on console; exiting PID 1 causes immediate kernel panic/reboot.
+if [ -c /dev/console ]; then
+  exec /bin/sh </dev/console >/dev/console 2>&1
+fi
+
+log "no /dev/console; entering idle loop"
+while true; do
+  $BB sleep 3600
+done

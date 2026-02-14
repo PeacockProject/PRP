@@ -1,0 +1,35 @@
+--- a/drivers/usb/gadget/Kconfig
++++ b/drivers/usb/gadget/Kconfig
+@@ -915,6 +915,32 @@
+ 	  Each function can be configured and enabled/disabled
+ 	  dynamically from userspace through a sysfs interface.
+ 
++config USB_ANDROID_SAMSUNG_COMPOSITE
++	bool "Samsung Android composite extensions"
++	depends on USB_G_ANDROID
++	help
++	  Enable Samsung-specific composite gadget hooks used by legacy
++	  jflte recovery and adb userspace.
++
++config USB_DUN_SUPPORT
++	bool "Samsung DUN support"
++	depends on USB_ANDROID_SAMSUNG_COMPOSITE
++	default y
++	help
++	  Enable Samsung DUN serial profile support.
++
++config USB_ANDROID_SAMSUNG_MTP
++	bool "Samsung MTP support"
++	depends on USB_ANDROID_SAMSUNG_COMPOSITE
++	help
++	  Enable Samsung MTP composite path.
++
++config USB_ANDROID_SAMSUNG_SIDESYNC
++	bool "Samsung SideSync support"
++	depends on USB_ANDROID_SAMSUNG_COMPOSITE
++	help
++	  Enable Samsung SideSync composite path.
++
+ config USB_CDC_COMPOSITE
+ 	tristate "CDC Composite Device (Ethernet and ACM)"
+ 	depends on NET

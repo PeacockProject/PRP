@@ -1,0 +1,349 @@
+[package]
+name = "samsung-jflte-display-fix"
+version = "1.0.12"
+description = "Samsung jflte OpenRC display preflight fix"
+
+[build]
+dependencies_openrc = ["openrc", "coreutils", "psmisc", "libinput", "xf86-input-libinput", "xf86-input-evdev", "xorg-xinput"]
+script = """
+set -e
+
+# Note: jflte intermittently fails to reach OpenRC "default" after handover,
+# resulting in a black screen even though "boot" completes. To keep the system
+# usable, we also start the display stack from "boot" on this device.
+mkdir -p stage/etc/init.d stage/etc/runlevels/boot stage/etc/runlevels/default stage/usr/local/sbin
+
+cat > stage/usr/local/sbin/peacock-sddm-powerctl <<'EOF'
+#!/bin/sh
+set -eu
+
+action="${1:-}"
+
+run_reboot() {
+    if command -v loginctl >/dev/null 2>&1; then
+        loginctl reboot >/dev/null 2>&1 && exit 0
+    fi
+    /usr/bin/openrc-shutdown --reboot now >/dev/null 2>&1 && exit 0
+    /sbin/reboot >/dev/null 2>&1 && exit 0
+    echo 1 > /proc/sys/kernel/sysrq 2>/dev/null || true
+    echo b > /proc/sysrq-trigger
+}
+
+run_poweroff() {
+    if command -v loginctl >/dev/null 2>&1; then
+        loginctl poweroff >/dev/null 2>&1 && exit 0
+    fi
+    /usr/bin/openrc-shutdown --poweroff now >/dev/null 2>&1 && exit 0
+    /sbin/poweroff >/dev/null 2>&1 && exit 0
+    echo 1 > /proc/sys/kernel/sysrq 2>/dev/null || true
+    echo o > /proc/sysrq-trigger
+}
+
+case "$action" in
+    reboot) run_reboot ;;
+    poweroff) run_poweroff ;;
+    *) exit 2 ;;
+esac
+EOF
+
+chmod 0755 stage/usr/local/sbin/peacock-sddm-powerctl
+
+cat > stage/etc/init.d/sddm-logind-wait <<'EOF'
+#!/sbin/openrc-run
+
+description="Wait for login1 DBus ownership before SDDM"
+
+depend() {
+    need dbus elogind
+    before sddm display-manager
+}
+
+start() {
+    checkpath -d -m 0755 /var/log
+    LOG_FILE="/var/log/sddm-logind-wait.log"
+    echo "=== sddm-logind-wait start ===" >> "$LOG_FILE" 2>&1
+
+    has_login1() {
+        dbus-send --system --dest=org.freedesktop.DBus --type=method_call --print-reply \
+            / org.freedesktop.DBus.NameHasOwner string:org.freedesktop.login1 2>/dev/null \
+            | grep -q "boolean true"
+    }
+
+    n=0
+    while [ "$n" -lt 40 ]; do
+        if has_login1; then
+            echo "login1_owner=ready (pre)" >> "$LOG_FILE" 2>&1
+            return 0
+        fi
+        n=$((n + 1))
+        sleep 0.2
+    done
+
+    echo "login1_owner=missing; restarting elogind" >> "$LOG_FILE" 2>&1
+    rc-service elogind restart >/dev/null 2>&1 || true
+
+    n=0
+    while [ "$n" -lt 40 ]; do
+        if has_login1; then
+            echo "login1_owner=ready (post)" >> "$LOG_FILE" 2>&1
+            return 0
+        fi
+        n=$((n + 1))
+        sleep 0.2
+    done
+
+    echo "login1_owner=missing (post)" >> "$LOG_FILE" 2>&1
+    return 0
+}
+EOF
+
+chmod 0755 stage/etc/init.d/sddm-logind-wait
+
+cat > stage/etc/init.d/samsung-jflte-display-fix <<'EOF'
+#!/sbin/openrc-run
+
+description="Samsung jflte display preflight"
+
+depend() {
+    need localmount devfs dbus elogind
+    before display-manager sddm lightdm greetd gdm ly
+}
+
+start() {
+    checkpath -d -m 0755 /var/log
+    LOG_FILE="/var/log/samsung-jflte-display-fix.log"
+    {
+        echo "=== samsung-jflte-display-fix start ==="
+        date -u '+utc=%Y-%m-%dT%H:%M:%SZ'
+    } >> "$LOG_FILE" 2>&1
+
+    has_login1() {
+        dbus-send --system --dest=org.freedesktop.DBus --type=method_call --print-reply \
+            / org.freedesktop.DBus.NameHasOwner string:org.freedesktop.login1 2>/dev/null \
+            | grep -q "boolean true"
+    }
+
+    # SDDM checks for login1 once at startup; if login1 is not owned yet,
+    # power actions are permanently unavailable for that daemon lifecycle.
+    n=0
+    while [ "$n" -lt 30 ]; do
+        if has_login1; then
+            echo "login1_owner=ready (pre)" >> "$LOG_FILE" 2>&1
+            break
+        fi
+        n=$((n + 1))
+        sleep 0.2
+    done
+    if ! has_login1; then
+        echo "login1_owner=missing; restarting elogind" >> "$LOG_FILE" 2>&1
+        rc-service elogind restart >/dev/null 2>&1 || true
+        n=0
+        while [ "$n" -lt 30 ]; do
+            has_login1 && break
+            n=$((n + 1))
+            sleep 0.2
+        done
+    fi
+    if has_login1; then
+        echo "login1_owner=ready (post)" >> "$LOG_FILE" 2>&1
+    else
+        echo "login1_owner=missing (post)" >> "$LOG_FILE" 2>&1
+    fi
+
+    # Ensure udev is alive and has populated input metadata before Xorg starts.
+    # Without this, Xorg's AutoAddDevices path on jflte ends up with no input.
+    if ! pidof udevd >/dev/null 2>&1; then
+        /sbin/udevd --daemon >/dev/null 2>&1 || true
+        /usr/lib/systemd/systemd-udevd --daemon >/dev/null 2>&1 || true
+    fi
+    udevadm trigger --action=add --type=subsystems >/dev/null 2>&1 || true
+    udevadm trigger --action=add --type=devices >/dev/null 2>&1 || true
+    udevadm settle --timeout=5 >/dev/null 2>&1 || true
+
+    checkpath -d -m 0755 /etc/X11/xorg.conf.d
+    checkpath -d -m 0755 /etc/peacock
+
+    # Device-specific touchscreen tuning (identity matrix by default).
+    if [ ! -f /etc/peacock/jflte-touch.conf ]; then
+        cat > /etc/peacock/jflte-touch.conf <<'CFG'
+# Optional touchscreen match by product name (substring, case-sensitive).
+# Example: TOUCH_DEVICE_NAME="sec_touchscreen"
+TOUCH_DEVICE_NAME=""
+# Optional absolute node (example: /dev/input/event3). Leave empty for auto.
+TOUCH_DEVICE_PATH=""
+
+# libinput CalibrationMatrix (identity by default).
+# Use this if axis mapping/inversion is wrong.
+TOUCH_CALIBRATION_MATRIX="1 0 0 0 1 0 0 0 1"
+CFG
+    fi
+    TOUCH_DEVICE_NAME=""
+    TOUCH_DEVICE_PATH=""
+    TOUCH_CALIBRATION_MATRIX="1 0 0 0 1 0 0 0 1"
+    # shellcheck source=/etc/peacock/jflte-touch.conf
+    . /etc/peacock/jflte-touch.conf 2>/dev/null || true
+    touch_event="$(awk '
+        BEGIN { want=0 }
+        $0 ~ /^N: Name="sec_touchscreen"/ || $0 ~ /^N: Name=".*touch.*"/ { want=1; next }
+        want && $0 ~ /^H: Handlers=/ {
+            for (i = 1; i <= NF; i++) {
+                if ($i ~ /^event[0-9]+$/) { print $i; exit }
+            }
+        }
+        $0 == "" { want=0 }
+    ' /proc/bus/input/devices 2>/dev/null || true)"
+    if [ -n "$TOUCH_DEVICE_PATH" ]; then
+        touch_event="${TOUCH_DEVICE_PATH##*/}"
+    fi
+    if [ -n "$touch_event" ] && [ ! -c "/dev/input/$touch_event" ]; then
+        touch_event=""
+    fi
+    echo "touch_event=${touch_event:-none}" >> "$LOG_FILE" 2>&1
+
+    # Known-good fbdev settings for jflte panel bring-up with Xorg.
+    cat > /etc/X11/xorg.conf.d/10-peacock-fbdev.conf <<'CFG'
+Section "Device"
+    Identifier "PeacockFBDev"
+    Driver "fbdev"
+    Option "fbdev" "/dev/fb0"
+    Option "ShadowFB" "false"
+EndSection
+Section "Screen"
+    Identifier "PeacockScreen"
+    Device "PeacockFBDev"
+    DefaultDepth 24
+EndSection
+CFG
+
+    # Fallback: force one explicit touchscreen input device even if udev
+    # doesn't hotplug any input nodes into Xorg.
+    rm -f /etc/X11/xorg.conf.d/41-peacock-touch-static.conf
+    if [ -n "$touch_event" ] && [ -c "/dev/input/$touch_event" ]; then
+        cat > /etc/X11/xorg.conf.d/41-peacock-touch-static.conf <<CFG
+Section "InputDevice"
+    Identifier "PeacockTouchDevice"
+    Driver "evdev"
+    Option "Device" "/dev/input/$touch_event"
+    Option "TypeName" "touchscreen"
+    Option "Mode" "Absolute"
+    Option "IgnoreRelativeAxes" "True"
+    Option "IgnoreAbsoluteAxes" "False"
+    Option "KioskTouchMode" "1"
+    Option "KioskTouchButton" "1"
+EndSection
+
+Section "ServerLayout"
+    Identifier "PeacockLayout"
+    Screen 0 "PeacockScreen"
+    InputDevice "PeacockTouchDevice" "CorePointer"
+EndSection
+CFG
+    fi
+
+    # Make touchscreen/keyboard work reliably with Xorg+SDDM on jflte.
+    cat > /etc/X11/xorg.conf.d/40-peacock-input-libinput.conf <<CFG
+Section "InputClass"
+    Identifier "PeacockTouchscreen"
+    MatchIsTouchscreen "on"
+    Driver "libinput"
+    Option "CalibrationMatrix" "$TOUCH_CALIBRATION_MATRIX"
+    Option "Tapping" "on"
+EndSection
+
+Section "InputClass"
+    Identifier "PeacockPointer"
+    MatchIsPointer "on"
+    Driver "libinput"
+EndSection
+
+Section "InputClass"
+    Identifier "PeacockKeyboard"
+    MatchIsKeyboard "on"
+    Driver "libinput"
+EndSection
+CFG
+    if [ -n "$TOUCH_DEVICE_NAME" ]; then
+        cat >> /etc/X11/xorg.conf.d/40-peacock-input-libinput.conf <<CFG
+
+Section "InputClass"
+    Identifier "PeacockTouchscreenByName"
+    MatchProduct "$TOUCH_DEVICE_NAME"
+    Driver "libinput"
+    Option "CalibrationMatrix" "$TOUCH_CALIBRATION_MATRIX"
+    Option "Tapping" "on"
+EndSection
+CFG
+    fi
+
+    # jflte-safe SDDM/X11 path: avoid extension combinations that trigger
+    # Xorg fbdev crashes on this device/kernel stack.
+    checkpath -d -m 0755 /etc/sddm.conf.d
+    cat > /etc/sddm.conf.d/zzz-samsung-jflte-safe.conf <<'CFG'
+[General]
+MinimumVT=2
+DisplayServer=x11
+InputMethod=qtvirtualkeyboard
+RebootCommand=/usr/local/sbin/peacock-sddm-powerctl reboot
+HaltCommand=/usr/local/sbin/peacock-sddm-powerctl poweroff
+GreeterEnvironment=QT_QUICK_BACKEND=software,QSG_RHI_BACKEND=software,QT_XCB_NO_XI2=1,QT_OPENGL=software,LIBGL_ALWAYS_SOFTWARE=1,QT_IM_MODULE=qtvirtualkeyboard
+
+[Theme]
+Current=peacock-phone
+
+[X11]
+ServerArguments=-nolisten tcp -noreset -verbose 4 -logfile /var/log/Xorg.0.log -extension GLX -extension COMPOSITE -extension DAMAGE -extension MIT-SHM
+EnableHiDPI=false
+CFG
+
+    # Avoid VT races between OpenRC getty services and display managers.
+    rm -f /etc/runlevels/default/agetty.tty1 \
+          /etc/runlevels/default/agetty.tty2 \
+          /etc/runlevels/default/agetty.tty3 \
+          /etc/runlevels/default/agetty.tty4 \
+          /etc/runlevels/default/agetty.tty5 \
+          /etc/runlevels/default/agetty.tty6
+    if [ -f /etc/inittab ]; then
+        grep -v '^tty[0-9]::respawn:' /etc/inittab > /etc/inittab.new 2>/dev/null || true
+        if [ -s /etc/inittab.new ]; then
+            mv /etc/inittab.new /etc/inittab
+        else
+            rm -f /etc/inittab.new
+        fi
+    fi
+
+    # Keep MSM panel alive: Xorg/fbdev does not always trigger refresh on jflte.
+    if [ -x /etc/init.d/peacock-fb-refresher ]; then
+        rc-service peacock-fb-refresher start >/dev/null 2>&1 || true
+    fi
+    if [ -w /sys/class/graphics/fb0/blank ]; then
+        echo 1 > /sys/class/graphics/fb0/blank 2>/dev/null || true
+        sleep 0.1 || true
+        echo 0 > /sys/class/graphics/fb0/blank 2>/dev/null || true
+    fi
+
+    {
+        echo "wrote /etc/X11/xorg.conf.d/40-peacock-input-libinput.conf"
+        if [ -f /etc/X11/xorg.conf.d/41-peacock-touch-static.conf ]; then
+            echo "wrote /etc/X11/xorg.conf.d/41-peacock-touch-static.conf (evdev)"
+        else
+            echo "no static touch file generated"
+        fi
+        ls -l /dev/input/event* 2>/dev/null | head -n 8 || true
+    } >> "$LOG_FILE" 2>&1
+}
+EOF
+
+chmod 0755 stage/etc/init.d/samsung-jflte-display-fix
+
+# Ensure the device preflight runs before the greeter.
+ln -sf /etc/init.d/samsung-jflte-display-fix stage/etc/runlevels/boot/samsung-jflte-display-fix
+ln -sf /etc/init.d/samsung-jflte-display-fix stage/etc/runlevels/default/samsung-jflte-display-fix
+
+# Keep SDDM startup deterministic even if OpenRC never transitions to "default".
+ln -sf /etc/init.d/sddm-logind-wait stage/etc/runlevels/boot/sddm-logind-wait
+ln -sf /etc/init.d/sddm-logind-wait stage/etc/runlevels/default/sddm-logind-wait
+
+# Start SDDM in boot on jflte; OpenRC will treat it as already started if
+# "default" is reached later.
+ln -sf /etc/init.d/sddm stage/etc/runlevels/boot/sddm
+"""

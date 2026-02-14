@@ -1,0 +1,60 @@
+[package]
+name = "peacock-fb-logger"
+version = "1.1.1"
+#
+# 2026-02-14: fb0 can register late (especially on warm reset) on some devices.
+# If the refresher exits early, the panel may stay black even if userspace is running.
+# Keep this script conservative and generic.
+description = "Keep MSM framebuffer refreshing during OpenRC boot"
+
+[build]
+use_qemu = true
+cross_compile = ""
+script = """
+mkdir -p stage/usr/bin stage/etc/init.d stage/etc/runlevels/sysinit
+
+cat > stage/usr/bin/peacock-fb-refresher <<'EOF'
+#!/bin/sh
+set -eu
+
+# Some kernels create only /dev/graphics/fb0 (Android-style). Link it if needed.
+if [ -e /dev/graphics/fb0 ] && [ ! -e /dev/fb0 ]; then
+    ln -sf /dev/graphics/fb0 /dev/fb0
+fi
+
+# Wait briefly for fb0 to report a usable mode so the refresher doesn't exit early.
+i=0
+while [ "$i" -lt 120 ]; do
+    if [ -e /dev/fb0 ] || [ -e /dev/graphics/fb0 ]; then
+        if [ -r /sys/class/graphics/fb0/virtual_size ]; then
+            vs="$(cat /sys/class/graphics/fb0/virtual_size 2>/dev/null || true)"
+            [ -n "$vs" ] && [ "$vs" != "0,0" ] && break
+        else
+            break
+        fi
+    fi
+    i=$((i+1))
+    sleep 0.1
+done
+
+exec /usr/bin/msm-fb-refresher --loop
+EOF
+
+chmod 0755 stage/usr/bin/peacock-fb-refresher
+
+cat > stage/etc/init.d/peacock-fb-refresher <<'EOF'
+#!/sbin/openrc-run
+description="Keep MSM framebuffer refreshing"
+command="/usr/bin/peacock-fb-refresher"
+command_background="yes"
+pidfile="/run/peacock-fb-refresher.pid"
+
+depend() {
+    need localmount
+    before bootmisc
+}
+EOF
+
+chmod 0755 stage/etc/init.d/peacock-fb-refresher
+ln -sf /etc/init.d/peacock-fb-refresher stage/etc/runlevels/sysinit/peacock-fb-refresher
+"""

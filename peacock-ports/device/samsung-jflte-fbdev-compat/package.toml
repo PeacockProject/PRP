@@ -1,0 +1,35 @@
+[package]
+name = "samsung-jflte-fbdev-compat"
+version = "0.5.1.1"
+description = "Samsung jflte fbdev compatibility module for Xorg"
+
+[build]
+dependencies = ["xf86-video-fbdev"]
+build_deps = [
+    "base-devel",
+    "pkgconf",
+    "xorg-util-macros",
+    "xorg-server-devel",
+    "xorgproto"
+]
+source = "https://www.x.org/releases/individual/driver/xf86-video-fbdev-0.5.1.tar.xz"
+checksum = "9c2bc0fb9af092804138e8d5cb5627cabf2919ef60f0d1544a95c4ac2047f387"
+script = """
+set -e
+
+patch -p1 < fbdev-unknown-type-fallback.patch
+
+JOBS="${PEACOCK_JOBS:-}"
+if [ -z "$JOBS" ]; then
+    if command -v nproc >/dev/null 2>&1; then
+        JOBS="$(nproc)"
+    else
+        JOBS=1
+    fi
+fi
+
+./configure --prefix=/usr
+make -j "$JOBS"
+
+install -Dm755 src/.libs/fbdev_drv.so "$PWD/stage/usr/lib/xorg/modules/drivers/fbdev_drv.so"
+"""

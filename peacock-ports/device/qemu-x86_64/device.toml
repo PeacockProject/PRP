@@ -1,0 +1,8 @@
+[device]
+name = "QEMU x86_64"
+architecture = "x86_64"
+flash_method = "qemu"
+
+[boot]
+cmdline = "root=LABEL=ROOT rw console=ttyS0,115200 loglevel=7"
+generate_bootimg = false

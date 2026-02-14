@@ -1,0 +1,17 @@
+[package]
+name = "make"
+version = "4.4.1"
+description = "GNU make utility (Arch version)"
+
+[build]
+source = "https://ftp.gnu.org/gnu/make/make-4.4.1.tar.gz"
+checksum = ""
+script = """
+tarball="$(ls -1 make-*.tar.gz 2>/dev/null | head -n1)"
+if [ -n "$tarball" ]; then
+  tar -xzf "$tarball" --strip-components=1
+fi
+./configure --prefix="$(pwd)/stage" --without-guile
+make -j$(nproc)
+make install
+"""

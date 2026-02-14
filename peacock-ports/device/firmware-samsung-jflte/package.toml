@@ -1,0 +1,11 @@
+[package]
+name = "firmware-samsung-jflte"
+version = "1.0.0"
+description = "Placeholder firmware package for Samsung Galaxy S4 (jflte)"
+
+[build]
+use_qemu = false
+cross_compile = "arm-linux-gnueabihf-"
+script = """
+mkdir -p stage
+"""

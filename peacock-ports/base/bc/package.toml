@@ -1,0 +1,19 @@
+[package]
+name = "bc"
+version = "1.08.2"
+description = "Arbitrary precision calculator language (Arch version)"
+
+[build]
+source = "https://ftp.gnu.org/gnu/bc/bc-1.08.2.tar.gz"
+checksum = ""
+script = """
+tarball="$(ls -1 bc-*.tar.gz 2>/dev/null | head -n1)"
+if [ -n "$tarball" ]; then
+  tar -xzf "$tarball" --strip-components=1
+fi
+./configure --prefix="$(pwd)/stage"
+make -j$(nproc)
+make install
+cp -a stage/bin ./
+cp -a stage/share ./
+"""

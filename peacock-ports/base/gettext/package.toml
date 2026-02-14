@@ -1,0 +1,17 @@
+[package]
+name = "gettext"
+version = "0.22.5"
+description = "GNU gettext runtime and tools (Arch version)"
+
+[build]
+source = "https://ftp.gnu.org/gnu/gettext/gettext-0.22.5.tar.gz"
+checksum = ""
+script = """
+./configure --prefix="$(pwd)/stage"
+make -j$(nproc)
+make install
+cp -a stage/bin ./
+cp -a stage/lib ./
+cp -a stage/include ./
+cp -a stage/share ./
+"""

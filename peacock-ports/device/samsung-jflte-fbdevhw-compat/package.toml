@@ -1,0 +1,39 @@
+[package]
+name = "samsung-jflte-fbdevhw-compat"
+version = "21.1.21.1"
+description = "Samsung jflte compatibility patch for Xorg libfbdevhw"
+
+[build]
+dependencies = ["xorg-server"]
+build_deps = [
+    "base-devel",
+    "pixman",
+    "xorg-server-devel"
+]
+source = "https://www.x.org/releases/individual/xserver/xorg-server-21.1.21.tar.xz"
+checksum = "c0cbe5545b3f645bae6024b830d1d1154a956350683a4e52b2fff5b0fa1ab519"
+script = """
+set -e
+
+patch -p1 < fbdevhw-nonpci-fallback.patch
+
+JOBS="${PEACOCK_JOBS:-}"
+if [ -z "$JOBS" ]; then
+    if command -v nproc >/dev/null 2>&1; then
+        JOBS="$(nproc)"
+    else
+        JOBS=1
+    fi
+fi
+
+cc -fPIC -O2 \
+   -DXORG_VERSION_CURRENT='XORG_VERSION_NUMERIC(21,1,21,0,0)' \
+   -I/usr/include/xorg \
+   -I/usr/include/pixman-1 \
+   -Ihw/xfree86/fbdevhw \
+   -shared \
+   -o libfbdevhw.so \
+   hw/xfree86/fbdevhw/fbdevhw.c
+
+install -Dm755 libfbdevhw.so "$PWD/stage/usr/lib/xorg/modules/libfbdevhw.so"
+"""

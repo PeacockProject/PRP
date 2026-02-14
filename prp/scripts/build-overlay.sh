@@ -1,0 +1,268 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/common.sh"
+
+[[ $# -eq 2 ]] || die "usage: $0 <config.env> <out_dir>"
+CFG="$1"
+OUT_DIR="$2"
+
+require_cmd dd
+require_cmd mkfs.ext4
+require_cmd tar
+require_cmd sha256sum
+
+load_config "$CFG"
+mkdir -p "$OUT_DIR"
+
+OVERLAY_SIZE_MB="${OVERLAY_SIZE_MB:-60}"
+OVERLAY_LABEL="${OVERLAY_LABEL:-PRP_ROOTFS}"
+# Legacy kernels (like 3.4 on jflte) can't mount modern ext4 features.
+# Keep the overlay image maximally compatible.
+# Note: e2fsprogs 1.47+ enables `orphan_file` by default, which old kernels can't mount.
+OVERLAY_EXT4_OPTS="${OVERLAY_EXT4_OPTS:--O ^metadata_csum,^metadata_csum_seed,^64bit,^orphan_file -E lazy_itable_init=0,lazy_journal_init=0}"
+
+STAGE_DIR="$OUT_DIR/overlay-stage"
+IMG="$OUT_DIR/prp-rootfs.img"
+
+rm -rf "$STAGE_DIR"
+mkdir -p "$STAGE_DIR"
+
+# Base template (empty by default, script creates the structure we need).
+TEMPLATE_DIR="$PRP_ROOT/overlay/rootfs"
+[[ -d "$TEMPLATE_DIR" ]] || die "overlay template missing: $TEMPLATE_DIR"
+cp -a "$TEMPLATE_DIR"/. "$STAGE_DIR"/
+
+mkdir -p \
+  "$STAGE_DIR/bin" \
+  "$STAGE_DIR/lib" \
+  "$STAGE_DIR/sbin" \
+  "$STAGE_DIR/usr/bin" \
+  "$STAGE_DIR/usr/lib" \
+  "$STAGE_DIR/usr/sbin" \
+  "$STAGE_DIR/etc/dropbear" \
+  "$STAGE_DIR/etc/prp" \
+  "$STAGE_DIR/root/.ssh" \
+  "$STAGE_DIR/tmp" \
+  "$STAGE_DIR/var" \
+  "$STAGE_DIR/opt"
+
+# Default GUI config (persistent, lives on PRP_ROOTFS).
+if [[ ! -f "$STAGE_DIR/etc/prp-gui.conf" ]]; then
+  cat > "$STAGE_DIR/etc/prp-gui.conf" <<'EOF'
+# PRP GUI configuration
+#
+# Keys:
+#   FBDEV=/dev/fb0
+#   INPUT=/dev/input/eventX
+#   POWER_INPUT=/dev/input/eventY
+#   SCALE=100   (50..200)
+#   LOGO=/mnt/prp_rootfs/etc/prp/header_logo.png
+#
+# Leave FBDEV/INPUT unset to auto-detect.
+
+SCALE=100
+EOF
+fi
+
+# Optional AppBar logo. Put header_logo.png in repo root or prp/overlay assets.
+for cand in \
+  "$PRP_ROOT/assets/header_logo.png" \
+  "$PRP_ROOT/logo_header.png" \
+  "$PRP_ROOT/header_logo.png" \
+  "$PRP_ROOT/../header_logo.png"; do
+  if [[ -f "$cand" ]]; then
+    cp -a "$cand" "$STAGE_DIR/etc/prp/header_logo.png"
+    break
+  fi
+done
+
+# Optional SSH login MOTD banner (ASCII art etc.).
+for cand in \
+  "$PRP_ROOT/motd.txt" \
+  "$PRP_ROOT/assets/motd.txt" \
+  "$PRP_ROOT/overlay/rootfs/etc/prp/motd.txt" \
+  "$PRP_ROOT/../motd.txt"; do
+  if [[ -f "$cand" ]]; then
+    cp -a "$cand" "$STAGE_DIR/etc/prp/motd.txt"
+    break
+  fi
+done
+
+# Ensure any template-provided scripts are executable.
+find "$STAGE_DIR/usr/bin" -maxdepth 1 -type f -print0 2>/dev/null | xargs -0r chmod +x || true
+
+# Include a standalone busybox on the overlay so PRP_ROOTFS can be used as a "toolbox" partition.
+BB_PATH="${BUSYBOX_STATIC/#\~/$HOME}"
+[[ -f "$BB_PATH" ]] || die "static busybox not found: $BB_PATH"
+cp -a "$BB_PATH" "$STAGE_DIR/sbin/busybox"
+chmod +x "$STAGE_DIR/sbin/busybox"
+ln -snf /sbin/busybox "$STAGE_DIR/bin/sh"
+
+# Broader set of applets for rescue/debug sessions.
+for app in \
+  sh ash \
+  ls cat echo printf grep egrep fgrep sed awk cut tr sort uniq wc head tail tee \
+  basename dirname \
+  find xargs strings \
+  ps top dmesg logread free df du stat uptime uname env id whoami \
+  mount umount mountpoint blkid lsmod modprobe insmod rmmod \
+  mkdir rmdir mknod chmod chown ln mv cp rm sync sleep kill killall \
+  hexdump xxd md5sum sha1sum sha256sum \
+  vi less more \
+  ip ifconfig route netstat ping ping6 nslookup \
+  tar gzip gunzip zcat unzip \
+  dd \
+  nc telnet telnetd tcpsvd \
+  fdisk sfdisk lsblk \
+  mke2fs mkfs.ext4 e2fsck fsck.ext4 fsck tune2fs dumpe2fs resize2fs; do
+  ln -snf /sbin/busybox "$STAGE_DIR/bin/$app" 2>/dev/null || true
+  ln -snf /sbin/busybox "$STAGE_DIR/usr/bin/$app" 2>/dev/null || true
+done
+
+# Compatibility wrappers for commands frequently expected during debugging.
+# They gracefully fall back when a BusyBox applet wasn't compiled in.
+rm -f \
+  "$STAGE_DIR/bin/whoami" "$STAGE_DIR/bin/lsblk" "$STAGE_DIR/bin/fdisk" \
+  "$STAGE_DIR/usr/bin/whoami" "$STAGE_DIR/usr/bin/lsblk" "$STAGE_DIR/usr/bin/fdisk"
+
+cat > "$STAGE_DIR/usr/bin/whoami" <<'EOF'
+#!/bin/sh
+exec /bin/id -un
+EOF
+chmod +x "$STAGE_DIR/usr/bin/whoami"
+
+cat > "$STAGE_DIR/usr/bin/lsblk" <<'EOF'
+#!/bin/sh
+if /sbin/busybox --list 2>/dev/null | /sbin/busybox grep -qx lsblk; then
+  exec /sbin/busybox lsblk "$@"
+fi
+printf '%-14s %-12s %-8s %s\n' NAME TYPE SIZE_MiB LABEL
+for u in /sys/class/block/mmcblk0* /sys/class/block/loop* /sys/class/block/sd*; do
+  [ -e "$u" ] || continue
+  n="${u##*/}"
+  [ "$n" = "mmcblk0boot0" ] && continue
+  [ "$n" = "mmcblk0boot1" ] && continue
+  szs="$(cat "$u/size" 2>/dev/null || echo 0)"
+  t="disk"
+  case "$n" in
+    *p[0-9]*) t="part" ;;
+  esac
+  mib=$((szs / 2048))
+  lbl="$(/sbin/busybox blkid "/dev/$n" 2>/dev/null | /sbin/busybox sed -n 's/.*LABEL=\"\\([^\"]*\\)\".*/\\1/p' || true)"
+  printf '%-14s %-12s %-8s %s\n' "$n" "$t" "$mib" "${lbl:-"-"}"
+done
+
+# Nested-partition aliases (exported by init as /dev/mmcblk0p29s* -> /dev/loopXpN).
+for a in /dev/mmcblk0p29s* /dev/block/mmcblk0p29s*; do
+  [ -L "$a" ] || continue
+  n="${a##*/}"
+  r="$("/sbin/busybox" readlink -f "$a" 2>/dev/null || true)"
+  [ -n "$r" ] || continue
+  src="${r##*/}"
+  szs="$(cat "/sys/class/block/$src/size" 2>/dev/null || echo 0)"
+  mib=$((szs / 2048))
+  lbl="$(/sbin/busybox blkid "$a" 2>/dev/null | /sbin/busybox sed -n 's/.*LABEL=\"\\([^\"]*\\)\".*/\\1/p' || true)"
+  printf '%-14s %-12s %-8s %s\n' "$n" "part" "$mib" "${lbl:-"-"}"
+done
+EOF
+chmod +x "$STAGE_DIR/usr/bin/lsblk"
+
+cat > "$STAGE_DIR/usr/bin/fdisk" <<'EOF'
+#!/bin/sh
+if [ -x /sbin/fdisk ]; then
+  export LD_LIBRARY_PATH="/lib:/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  exec /sbin/fdisk "$@"
+fi
+if /sbin/busybox --list 2>/dev/null | /sbin/busybox grep -qx fdisk; then
+  exec /sbin/busybox fdisk "$@"
+fi
+echo "fdisk applet not available in busybox; showing partition summary instead."
+exec /usr/bin/prp-partlist
+EOF
+chmod +x "$STAGE_DIR/usr/bin/fdisk"
+
+# SSH server + scp (static ARMv7).
+"$SCRIPT_DIR/build-dropbear.sh" "$CFG" "$OUT_DIR"
+cp -a "$OUT_DIR/tools/dropbear-out/armv7/dropbear" "$STAGE_DIR/usr/sbin/dropbear"
+cp -a "$OUT_DIR/tools/dropbear-out/armv7/dropbearkey" "$STAGE_DIR/usr/sbin/dropbearkey"
+cp -a "$OUT_DIR/tools/dropbear-out/armv7/scp" "$STAGE_DIR/usr/bin/scp"
+chmod +x "$STAGE_DIR/usr/sbin/dropbear" "$STAGE_DIR/usr/sbin/dropbearkey" "$STAGE_DIR/usr/bin/scp"
+
+# Keep PRP's framebuffer helpers available even when /usr is bind-mounted from overlay.
+VENDOR_RUNTIME="$PRP_ROOT/vendor/$TARGET_NAME/rootfs-runtime"
+for f in peacock-splash msm-fb-refresher; do
+  if [[ -x "$VENDOR_RUNTIME/usr/bin/$f" ]]; then
+    cp -a "$VENDOR_RUNTIME/usr/bin/$f" "$STAGE_DIR/usr/bin/$f"
+    chmod +x "$STAGE_DIR/usr/bin/$f"
+  fi
+done
+
+# Keep full fdisk stack on PRP_ROOTFS (overlay) for maintenance/debug sessions.
+if [[ -x "$VENDOR_RUNTIME/sbin/fdisk" ]]; then
+  cp -a "$VENDOR_RUNTIME/sbin/fdisk" "$STAGE_DIR/sbin/fdisk"
+  chmod +x "$STAGE_DIR/sbin/fdisk"
+  shopt -s nullglob
+  for pat in \
+    'ld-linux-armhf.so*' \
+    'libc.so*' \
+    'libgcc_s.so*' \
+    'libm.so*' \
+    'libfdisk.so*' \
+    'libreadline.so*' \
+    'libncursesw.so*' \
+    'libtinfo.so*' \
+    'libsmartcols.so*' \
+    'libblkid.so*' \
+    'libuuid.so*' \
+    'libudev.so*'; do
+    for src in "$VENDOR_RUNTIME"/lib/$pat "$VENDOR_RUNTIME"/usr/lib/$pat; do
+      [[ -e "$src" || -L "$src" ]] || continue
+      cp -a "$src" "$STAGE_DIR/lib/"
+    done
+  done
+  shopt -u nullglob
+fi
+
+# GUI binary (static ARMv7). Optional: if build fails, we still create an overlay image.
+if "$SCRIPT_DIR/build-gui.sh" "$CFG" "$OUT_DIR"; then
+  if [[ -f "$OUT_DIR/tools/gui-out/armv7/prp-gui" ]]; then
+    cp -a "$OUT_DIR/tools/gui-out/armv7/prp-gui" "$STAGE_DIR/usr/bin/prp-gui"
+    chmod +x "$STAGE_DIR/usr/bin/prp-gui"
+  fi
+else
+  echo "overlay: gui build failed; continuing without GUI" >&2
+fi
+
+# Best-effort: bake host public keys into overlay for key-based login.
+if [[ -d "$HOME/.ssh" ]]; then
+  auth_src=()
+  while IFS= read -r -d '' f; do auth_src+=("$f"); done < <(find "$HOME/.ssh" -maxdepth 1 -type f -name '*.pub' -print0 2>/dev/null || true)
+  if [[ -f "$HOME/.ssh/authorized_keys" ]]; then
+    auth_src+=("$HOME/.ssh/authorized_keys")
+  fi
+  if [[ "${#auth_src[@]}" -gt 0 ]]; then
+    # De-dupe and strip empty/comment-only lines.
+    awk 'NF && $1 !~ /^#/ { if(!seen[$0]++) print $0 }' "${auth_src[@]}" > "$STAGE_DIR/root/.ssh/authorized_keys"
+    cp -a "$STAGE_DIR/root/.ssh/authorized_keys" "$STAGE_DIR/etc/dropbear/authorized_keys"
+    chmod 0700 "$STAGE_DIR/root/.ssh"
+    chmod 0600 "$STAGE_DIR/root/.ssh/authorized_keys"
+    chmod 0600 "$STAGE_DIR/etc/dropbear/authorized_keys"
+  fi
+fi
+
+# Create ext4 image populated from a tarball so we can force numeric root ownership without sudo.
+rm -f "$IMG"
+dd if=/dev/zero of="$IMG" bs=1M count="$OVERLAY_SIZE_MB" status=none
+
+TAR="$OUT_DIR/overlay-stage.tar"
+rm -f "$TAR"
+tar --numeric-owner --owner=0 --group=0 -cpf "$TAR" -C "$STAGE_DIR" .
+
+mkfs.ext4 -F -L "$OVERLAY_LABEL" $OVERLAY_EXT4_OPTS -d "$TAR" "$IMG" >/dev/null
+
+echo "overlay: $IMG"
+ls -lh "$IMG"
+sha256sum "$IMG"

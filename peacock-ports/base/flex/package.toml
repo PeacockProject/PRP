@@ -1,0 +1,19 @@
+[package]
+name = "flex"
+version = "2.6.4"
+description = "Fast lexical analyzer generator (Arch version)"
+
+[build]
+source = "https://github.com/westes/flex/releases/download/v2.6.4/flex-2.6.4.tar.gz"
+checksum = ""
+script = """
+tarball="$(ls -1 flex-*.tar.gz 2>/dev/null | head -n1)"
+if [ -n "$tarball" ]; then
+  tar -xzf "$tarball" --strip-components=1
+fi
+./configure --prefix="$(pwd)/stage"
+make -j$(nproc)
+make install
+cp -a stage/bin ./
+cp -a stage/share ./
+"""

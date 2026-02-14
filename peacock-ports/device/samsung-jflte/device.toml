@@ -1,0 +1,20 @@
+[device]
+name = "Samsung Galaxy S4 (Qualcomm)"
+architecture = "armv7"
+flash_method = "heimdall-bootimg"
+
+[boot]
+cmdline = "androidboot.hardware=qcom user_debug=31 zcache msm_rtb.filter=0x3F ehci-hcd.park=3 buildvariant=userdebug earlyprintk console=tty0,115200 console=tty1,115200 loglevel=7 fbcon=map:0"
+generate_bootimg = true
+
+[boot.android]
+base = "0x80200000"
+page_size = 2048
+kernel_offset = "0x00008000"
+ramdisk_offset = "0x02000000"
+second_offset = "0x00f00000"
+tags_offset = "0x00000100"
+
+[quirks]
+keep_fb_refresher_with_dm = false
+xorg_force_vt1 = false
