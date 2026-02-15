@@ -1,11 +1,11 @@
 [package]
 name = "samsung-jflte-display-fix"
-version = "1.0.32"
+version = "1.0.33"
 description = "Samsung jflte OpenRC display preflight fix"
 depends = ["peacock-sddm-theme-peacock-phone"]
 
 [build]
-dependencies_openrc = ["openrc", "coreutils", "psmisc", "libinput", "xf86-input-libinput", "xf86-input-evdev", "xorg-xinput", "openbox", "xterm", "peacock-sddm-theme-peacock-phone"]
+dependencies_openrc = ["openrc", "coreutils", "psmisc", "libinput", "xf86-input-libinput", "xf86-input-evdev", "xorg-xinput", "openbox", "xterm", "fastfetch", "peacock-sddm-theme-peacock-phone"]
 script = """
 set -e
 
@@ -547,6 +547,123 @@ Version=1.0
 Name=Peacock XFCE WM Fallback
 Comment=Start panel/desktop without WM check on jflte
 Exec=/usr/local/bin/peacock-xfce-wm-fallback
+OnlyShowIn=XFCE;
+X-GNOME-Autostart-enabled=true
+NoDisplay=true
+CFG
+
+    # Provide a dedicated launcher target for panel/app menu.
+    checkpath -d -m 0755 /usr/share/applications
+    cat > /usr/share/applications/peacock-fastfetch.desktop <<'CFG'
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Fastfetch
+Comment=Show system information
+Exec=xfce4-terminal --title=Fastfetch --hold --command=fastfetch
+Icon=utilities-terminal
+Terminal=false
+Categories=System;Utility;X-XFCE;
+OnlyShowIn=XFCE;
+CFG
+
+    # Ensure bottom panel has a dedicated Fastfetch button.
+    cat > /usr/local/bin/peacock-xfce-fastfetch-button <<'CFG'
+#!/bin/sh
+set -eu
+
+case "${XDG_CURRENT_DESKTOP:-}" in
+    *XFCE*) ;;
+    *) exit 0 ;;
+esac
+
+command -v xfconf-query >/dev/null 2>&1 || exit 0
+command -v fastfetch >/dev/null 2>&1 || exit 0
+
+cfg_root="${XDG_CONFIG_HOME:-$HOME/.config}/xfce4"
+panel_dir="$cfg_root/panel"
+mkdir -p "$panel_dir"
+
+fastfetch_plugin_id=""
+for id in $(xfconf-query -c xfce4-panel -p /plugins -lv 2>/dev/null \
+    | awk '/\\/plugins\\/plugin-[0-9]+[[:space:]]+launcher$/ { sub(".*/plugin-","",$1); print $1 }'); do
+    if xfconf-query -c xfce4-panel -p "/plugins/plugin-$id/items" 2>/dev/null | grep -q "peacock-fastfetch.desktop"; then
+        fastfetch_plugin_id="$id"
+        break
+    fi
+done
+
+ids="$(xfconf-query -c xfce4-panel -p /panels/panel-2/plugin-ids 2>/dev/null | awk '/^[0-9]+$/ { print }' || true)"
+panel_has_id() {
+    target="$1"
+    for id in $ids; do
+        if [ "$id" = "$target" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+if [ -n "$fastfetch_plugin_id" ]; then
+    new_id="$fastfetch_plugin_id"
+else
+    max_id=18
+    for id in $(xfconf-query -c xfce4-panel -p /plugins -lv 2>/dev/null \
+        | awk '/\\/plugins\\/plugin-[0-9]+/ { sub(".*/plugin-","",$1); if ($1 ~ /^[0-9]+$/) print $1 }'); do
+        if [ "$id" -gt "$max_id" ]; then
+            max_id="$id"
+        fi
+    done
+    new_id=$((max_id + 1))
+
+    xfconf-query -c xfce4-panel -p "/plugins/plugin-$new_id" -n -t string -s launcher >/dev/null 2>&1 \
+        || xfconf-query -c xfce4-panel -p "/plugins/plugin-$new_id" -t string -s launcher >/dev/null 2>&1 || true
+fi
+
+checkpath -d -m 0700 "$panel_dir/launcher-$new_id"
+cat > "$panel_dir/launcher-$new_id/peacock-fastfetch.desktop" <<'DESKTOP'
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Fastfetch
+Comment=Show system information
+Exec=xfce4-terminal --title=Fastfetch --hold --command=fastfetch
+Icon=utilities-terminal
+Terminal=false
+Categories=System;Utility;X-XFCE;
+OnlyShowIn=XFCE;
+DESKTOP
+
+xfconf-query -c xfce4-panel -p "/plugins/plugin-$new_id/items" -n -t string -s peacock-fastfetch.desktop >/dev/null 2>&1 \
+    || xfconf-query -c xfce4-panel -p "/plugins/plugin-$new_id/items" --type string --set peacock-fastfetch.desktop --force-array >/dev/null 2>&1 || true
+
+if panel_has_id "$new_id"; then
+    exit 0
+fi
+
+if [ -z "$ids" ]; then
+    xfconf-query -c xfce4-panel -p /panels/panel-2/plugin-ids -n -t int -s "$new_id" >/dev/null 2>&1 || true
+else
+    set -- -c xfce4-panel -p /panels/panel-2/plugin-ids
+    for id in $ids; do
+        set -- "$@" -t int -s "$id"
+    done
+    set -- "$@" -t int -s "$new_id"
+    xfconf-query "$@" >/dev/null 2>&1 || true
+fi
+
+xfce4-panel -r >/dev/null 2>&1 || true
+exit 0
+CFG
+    chmod 0755 /usr/local/bin/peacock-xfce-fastfetch-button
+
+    cat > /etc/xdg/autostart/peacock-xfce-fastfetch-button.desktop <<'CFG'
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Peacock Fastfetch Button
+Comment=Ensure Fastfetch launcher exists on the bottom panel
+Exec=/usr/local/bin/peacock-xfce-fastfetch-button
 OnlyShowIn=XFCE;
 X-GNOME-Autostart-enabled=true
 NoDisplay=true
