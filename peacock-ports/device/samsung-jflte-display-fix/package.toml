@@ -1,6 +1,6 @@
 [package]
 name = "samsung-jflte-display-fix"
-version = "1.0.34"
+version = "1.0.35"
 description = "Samsung jflte OpenRC display preflight fix"
 depends = ["peacock-sddm-theme-peacock-phone"]
 
@@ -376,10 +376,10 @@ CFG
 <?xml version="1.0" encoding="UTF-8"?>
 <channel name="xsettings" version="1.0">
   <property name="Xft" type="empty">
-    <property name="DPI" type="int" value="122880"/>
+    <property name="DPI" type="int" value="98304"/>
   </property>
   <property name="Gtk" type="empty">
-    <property name="CursorThemeSize" type="int" value="32"/>
+    <property name="CursorThemeSize" type="int" value="24"/>
     <property name="WindowScalingFactor" type="int" value="1"/>
   </property>
 </channel>
@@ -415,10 +415,10 @@ CFG_HOME
 <?xml version="1.0" encoding="UTF-8"?>
 <channel name="xsettings" version="1.0">
   <property name="Xft" type="empty">
-    <property name="DPI" type="int" value="122880"/>
+    <property name="DPI" type="int" value="98304"/>
   </property>
   <property name="Gtk" type="empty">
-    <property name="CursorThemeSize" type="int" value="32"/>
+    <property name="CursorThemeSize" type="int" value="24"/>
     <property name="WindowScalingFactor" type="int" value="1"/>
   </property>
 </channel>
