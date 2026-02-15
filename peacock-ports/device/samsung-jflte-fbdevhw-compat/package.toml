@@ -1,6 +1,6 @@
 [package]
 name = "samsung-jflte-fbdevhw-compat"
-version = "21.1.21.1"
+version = "21.1.21.2"
 description = "Samsung jflte compatibility patch for Xorg libfbdevhw"
 
 [build]

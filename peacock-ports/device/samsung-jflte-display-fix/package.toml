@@ -1,14 +1,28 @@
 [package]
 name = "samsung-jflte-display-fix"
-version = "1.0.20"
+version = "1.0.31"
 description = "Samsung jflte OpenRC display preflight fix"
+depends = ["peacock-sddm-theme-peacock-phone"]
 
 [build]
-dependencies_openrc = ["openrc", "coreutils", "psmisc", "libinput", "xf86-input-libinput", "xf86-input-evdev", "xorg-xinput"]
+dependencies_openrc = ["openrc", "coreutils", "psmisc", "libinput", "xf86-input-libinput", "xf86-input-evdev", "xorg-xinput", "openbox", "xterm", "peacock-sddm-theme-peacock-phone"]
 script = """
 set -e
 
-mkdir -p stage/etc/init.d stage/etc/runlevels/boot stage/usr/local/sbin
+mkdir -p stage/etc/init.d stage/etc/runlevels/boot stage/usr/local/sbin stage/etc/conf.d stage/etc/udev/rules.d
+
+cat > stage/etc/conf.d/cgroups <<'EOF'
+# jflte kernel is cgroup v1-only; OpenRC defaults to unified (v2),
+# which leaves /sys/fs/cgroup unmounted and makes elogind crash.
+rc_cgroup_mode="legacy"
+EOF
+
+cat > stage/etc/udev/rules.d/71-jflte-seat-master.rules <<'EOF'
+# elogind reports seat0 CanGraphical=false on fbdev-only jflte unless the
+# framebuffer device is tagged as a seat master. When CanGraphical=false,
+# SDDM can stall after "Logind interface found" and never start Xorg.
+SUBSYSTEM=="graphics", KERNEL=="fb0", TAG+="master-of-seat"
+EOF
 
 cat > stage/usr/local/sbin/peacock-sddm-powerctl <<'EOF'
 #!/bin/sh
@@ -68,6 +82,7 @@ start() {
         /sbin/udevd --daemon >/dev/null 2>&1 || true
         /usr/lib/systemd/systemd-udevd --daemon >/dev/null 2>&1 || true
     fi
+    /usr/bin/udevadm control --reload-rules >/dev/null 2>&1 || true
     /usr/bin/udevadm trigger --action=add --type=subsystems >/dev/null 2>&1 || true
     /usr/bin/udevadm trigger --action=add --type=devices >/dev/null 2>&1 || true
     /usr/bin/udevadm settle --timeout=10 >/dev/null 2>&1 || true
@@ -95,17 +110,47 @@ CFG
     # Detect touchscreen event node dynamically.
     # This avoids hardcoding /dev/input/event3 and survives event index changes.
     touch_event="none"
+    touch_name="none"
     for ev in /dev/input/event*; do
         [ -e "$ev" ] || continue
         evnum="${ev##*/}"
         name=""
+        lname=""
+        abs_caps=""
+        has_abs=0
         if [ -f "/sys/class/input/${evnum}/device/name" ]; then
             name=$(cat "/sys/class/input/${evnum}/device/name" 2>/dev/null || true)
         fi
-        case "$name" in
-            *sec_touchscreen*|*touchscreen*|*touch*)
+        lname=$(echo "$name" | tr '[:upper:]' '[:lower:]')
+        if [ -r "/sys/class/input/${evnum}/device/capabilities/abs" ]; then
+            abs_caps=$(cat "/sys/class/input/${evnum}/device/capabilities/abs" 2>/dev/null || true)
+        fi
+        case "$abs_caps" in
+            ""|0|0000000000000000|0000000000000000*)
+                has_abs=0
+                ;;
+            *)
+                has_abs=1
+                ;;
+        esac
+        # Ignore capacitive touchkey/button nodes; they are keys, not touchscreen axes.
+        case "$lname" in
+            *touchkey*|*button*)
+                continue
+                ;;
+        esac
+        case "$lname" in
+            *sec_touchscreen*|*touchscreen*)
                 touch_event="$ev"
+                touch_name="$name"
                 break
+                ;;
+            *touch*)
+                if [ "$has_abs" = "1" ]; then
+                    touch_event="$ev"
+                    touch_name="$name"
+                    break
+                fi
                 ;;
         esac
     done
@@ -113,7 +158,9 @@ CFG
         touch_event="$(awk '
             BEGIN { want=0 }
             /^N: Name=/ {
-                if ($0 ~ /sec_touchscreen|touchscreen|[Tt]ouch/) want=1; else want=0
+                low=tolower($0)
+                if (low ~ /touchkey/) { want=0; next }
+                if (low ~ /sec_touchscreen|touchscreen/) want=1; else want=0
             }
             want && /^H: Handlers=/ {
                 for (i = 1; i <= NF; i++) {
@@ -123,11 +170,7 @@ CFG
         ' /proc/bus/input/devices 2>/dev/null || true)"
         [ -n "$touch_event" ] || touch_event="none"
     fi
-    if [ "$touch_event" = "none" ] && [ -c /dev/input/event3 ]; then
-        # jflte fallback observed on many boots.
-        touch_event="/dev/input/event3"
-    fi
-    echo "touch_event=$touch_event" >> "$LOG_FILE" 2>&1
+    echo "touch_event=$touch_event touch_name=$touch_name" >> "$LOG_FILE" 2>&1
 
     # Known-good fbdev settings for jflte panel bring-up with Xorg.
     cat > /etc/X11/xorg.conf.d/10-peacock-fbdev.conf <<'CFG'
@@ -218,6 +261,24 @@ ServerArguments=-nolisten tcp -noreset -keeptty -verbose 4 -logfile /var/log/Xor
 EnableHiDPI=false
 CFG
 
+    # Keep OpenRC/logind stable for desktop sessions on jflte.
+    # Non-root users call rc-service for diagnostics; rc.conf must be world-readable.
+    [ -f /etc/rc.conf ] && chmod 0644 /etc/rc.conf >/dev/null 2>&1 || true
+    if [ -x /etc/init.d/elogind ] && [ ! -e /etc/runlevels/default/elogind ]; then
+        ln -sf /etc/init.d/elogind /etc/runlevels/default/elogind || true
+    fi
+    for svc in cgroups dbus elogind; do
+        if [ -x "/etc/init.d/$svc" ]; then
+            rc-service "$svc" start >/dev/null 2>&1 || true
+            rc-service "$svc" status >> "$LOG_FILE" 2>&1 || true
+        fi
+    done
+    if command -v busctl >/dev/null 2>&1; then
+        busctl --system get-property org.freedesktop.login1 \
+            /org/freedesktop/login1/seat/seat0 org.freedesktop.login1.Seat CanGraphical \
+            >> "$LOG_FILE" 2>&1 || true
+    fi
+
     # OpenRC userspace fallback for XFCE sessions under SDDM:
     # ensure runtime dir + DBus session are present even when PAM/logind
     # propagation is incomplete on this device.
@@ -253,10 +314,10 @@ cfg_home="${XDG_CONFIG_HOME:-${HOME:-/tmp}/.config}"
 cfg_file="$cfg_home/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml"
 mkdir -p "$(dirname "$cfg_file")" 2>/dev/null || true
 if [ -f "$cfg_file" ]; then
-    sed -i 's/\(<property name="use_compositing" type="bool" value="\)true\(".*\)/\1false\2/' "$cfg_file" 2>/dev/null || true
-    sed -i 's/\(<property name="show_dock_shadow" type="bool" value="\)true\(".*\)/\1false\2/' "$cfg_file" 2>/dev/null || true
-    sed -i 's/\(<property name="show_frame_shadow" type="bool" value="\)true\(".*\)/\1false\2/' "$cfg_file" 2>/dev/null || true
-    sed -i 's/\(<property name="show_popup_shadow" type="bool" value="\)true\(".*\)/\1false\2/' "$cfg_file" 2>/dev/null || true
+    sed -i 's/\\(<property name="use_compositing" type="bool" value="\\)true\\(".*\\)/\\1false\\2/' "$cfg_file" 2>/dev/null || true
+    sed -i 's/\\(<property name="show_dock_shadow" type="bool" value="\\)true\\(".*\\)/\\1false\\2/' "$cfg_file" 2>/dev/null || true
+    sed -i 's/\\(<property name="show_frame_shadow" type="bool" value="\\)true\\(".*\\)/\\1false\\2/' "$cfg_file" 2>/dev/null || true
+    sed -i 's/\\(<property name="show_popup_shadow" type="bool" value="\\)true\\(".*\\)/\\1false\\2/' "$cfg_file" 2>/dev/null || true
 else
     cat > "$cfg_file" <<'XFCFG'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -317,10 +378,10 @@ CFG
         cfg="$home/.config/xfce4/xfconf/xfce-perchannel-xml/xfwm4.xml"
         mkdir -p "$(dirname "$cfg")"
         if [ -f "$cfg" ]; then
-            sed -i 's/\(<property name="use_compositing" type="bool" value="\)true\(".*\)/\1false\2/' "$cfg" || true
-            sed -i 's/\(<property name="show_dock_shadow" type="bool" value="\)true\(".*\)/\1false\2/' "$cfg" || true
-            sed -i 's/\(<property name="show_frame_shadow" type="bool" value="\)true\(".*\)/\1false\2/' "$cfg" || true
-            sed -i 's/\(<property name="show_popup_shadow" type="bool" value="\)true\(".*\)/\1false\2/' "$cfg" || true
+            sed -i 's/\\(<property name="use_compositing" type="bool" value="\\)true\\(".*\\)/\\1false\\2/' "$cfg" || true
+            sed -i 's/\\(<property name="show_dock_shadow" type="bool" value="\\)true\\(".*\\)/\\1false\\2/' "$cfg" || true
+            sed -i 's/\\(<property name="show_frame_shadow" type="bool" value="\\)true\\(".*\\)/\\1false\\2/' "$cfg" || true
+            sed -i 's/\\(<property name="show_popup_shadow" type="bool" value="\\)true\\(".*\\)/\\1false\\2/' "$cfg" || true
         else
             cat > "$cfg" <<'CFG_HOME'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -338,14 +399,35 @@ CFG_HOME
         chown -R "$user_name:$user_name" "$home/.config" 2>/dev/null || true
     done
 
+    # Prefer xfce4-terminal once fbdevhw channel order is normalized.
+    if [ -f /etc/xdg/xfce4/helpers.rc ]; then
+        sed -i 's/^TerminalEmulator=.*/TerminalEmulator=xfce4-terminal/' /etc/xdg/xfce4/helpers.rc || true
+    fi
+    for home in /home/*; do
+        [ -d "$home" ] || continue
+        user_name="$(basename "$home")"
+        mkdir -p "$home/.config/xfce4"
+        if [ -f "$home/.config/xfce4/helpers.rc" ]; then
+            sed -i 's/^TerminalEmulator=.*/TerminalEmulator=xfce4-terminal/' "$home/.config/xfce4/helpers.rc" || true
+        else
+            cp /etc/xdg/xfce4/helpers.rc "$home/.config/xfce4/helpers.rc" 2>/dev/null || true
+        fi
+        chown -R "$user_name:$user_name" "$home/.config/xfce4" 2>/dev/null || true
+    done
+
     # Keep panel/desktop visible when xfwm4 dies by starting fallback instances
     # that skip WM registration checks.
     cat > /usr/local/bin/peacock-xfce-wm-fallback <<'CFG'
 #!/bin/sh
 (
-  sleep 1
-  pgrep -x xfce4-panel >/dev/null 2>&1 || xfce4-panel --disable-wm-check >/dev/null 2>&1 &
-  pgrep -x xfdesktop >/dev/null 2>&1 || xfdesktop --disable-wm-check >/dev/null 2>&1 &
+  sleep 2
+  if ! pgrep -x openbox >/dev/null 2>&1 && ! pgrep -x xfwm4 >/dev/null 2>&1; then
+    pgrep -x xfdesktop >/dev/null 2>&1 || xfdesktop --disable-wm-check >/dev/null 2>&1 &
+    sleep 1
+    # Without a WM, desktop can cover the panel. Restart panel last to keep it visible.
+    pgrep -x xfce4-panel >/dev/null 2>&1 && killall xfce4-panel >/dev/null 2>&1 || true
+    xfce4-panel --disable-wm-check >/dev/null 2>&1 &
+  fi
 ) &
 exit 0
 CFG
@@ -360,6 +442,15 @@ logf="${HOME:-/tmp}/.local/share/sddm/peacock-xfce4-panel.log"
 mkdir -p "$(dirname "$logf")" 2>/dev/null || true
 echo "panel_wrapper start $(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo unknown)" >> "$logf" 2>&1
 
+# If WM crashes, xfdesktop may map after panel and cover it.
+# Wait briefly for xfdesktop so panel starts on top.
+i=0
+while [ "$i" -lt 20 ]; do
+    pgrep -x xfdesktop >/dev/null 2>&1 && break
+    sleep 1
+    i=$((i + 1))
+done
+
 # Keep panel alive if it exits during early-session races.
 n=0
 while [ "$n" -lt 5 ]; do
@@ -373,6 +464,33 @@ exit 0
 CFG
     chmod 0755 /usr/local/bin/peacock-xfce4-panel
 
+    cat > /usr/local/bin/peacock-openbox <<'CFG'
+#!/bin/sh
+logf="${HOME:-/tmp}/.local/share/sddm/peacock-openbox.log"
+mkdir -p "$(dirname "$logf")" 2>/dev/null || true
+echo "openbox_wrapper start $(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo unknown)" >> "$logf" 2>&1
+exec /usr/bin/openbox "$@" >> "$logf" 2>&1
+CFG
+    chmod 0755 /usr/local/bin/peacock-openbox
+
+    cat > /usr/local/bin/peacock-xfwm4 <<'CFG'
+#!/bin/sh
+logf="${HOME:-/tmp}/.local/share/sddm/peacock-xfwm4.log"
+mkdir -p "$(dirname "$logf")" 2>/dev/null || true
+echo "xfwm4_wrapper start $(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo unknown)" >> "$logf" 2>&1
+
+n=0
+while [ "$n" -lt 6 ]; do
+    /usr/bin/xfwm4 --compositor=off "$@" >> "$logf" 2>&1
+    rc=$?
+    echo "xfwm4_wrapper exit rc=$rc iter=$n" >> "$logf" 2>&1
+    n=$((n + 1))
+    sleep 1
+done
+exit 0
+CFG
+    chmod 0755 /usr/local/bin/peacock-xfwm4
+
     cat > /usr/local/bin/peacock-xfdesktop <<'CFG'
 #!/bin/sh
 logf="${HOME:-/tmp}/.local/share/sddm/peacock-xfdesktop.log"
@@ -383,6 +501,10 @@ CFG
     chmod 0755 /usr/local/bin/peacock-xfdesktop
 
     if [ -f /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml ]; then
+        sed -i 's/value="xfwm4"/value="peacock-openbox"/g' \
+            /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml || true
+        sed -i 's/value="peacock-xfwm4"/value="peacock-openbox"/g' \
+            /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml || true
         sed -i 's/value="xfce4-panel"/value="peacock-xfce4-panel"/g' \
             /etc/xdg/xfce4/xfconf/xfce-perchannel-xml/xfce4-session.xml || true
         sed -i 's/value="xfdesktop"/value="peacock-xfdesktop"/g' \
@@ -436,6 +558,7 @@ chmod 0755 stage/etc/init.d/samsung-jflte-display-fix
 ln -sf /etc/init.d/samsung-jflte-display-fix stage/etc/runlevels/boot/samsung-jflte-display-fix
 
 mkdir -p stage/etc/runlevels/default
+ln -sf /etc/init.d/elogind stage/etc/runlevels/default/elogind
 
 cat > stage/etc/init.d/sddm-logind-wait <<'EOF'
 #!/sbin/openrc-run
