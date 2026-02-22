@@ -1,7 +1,0 @@
-[submodule "lk2nd_src"]
-	path = lk2nd_src
-	url = git@github.com:PeacockProject/lk2nd_prp.git
-[submodule "peacock-ports"]
-	path = peacock-ports
-	url = git@github.com:PeacockProject/peacock-ports.git
-	branch = main
