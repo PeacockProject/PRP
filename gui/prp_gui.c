@@ -548,8 +548,8 @@ static bool pick_power_event(char *out_path, size_t out_sz, const char *exclude_
         if(has_power) score += 10;
         if(has_wakeup) score += 2;
         if(has_sleep) score += 1;
-        if(strcasestr_like(name, "power") || strcasestr_like(name, "pwr") || strcasestr_like(name, "pm8") ||
-           strcasestr_like(name, "qpnp") || strcasestr_like(name, "gpio-keys")) {
+        if(strcasestr_like(name, "power") || strcasestr_like(name, "pwr") ||
+           strcasestr_like(name, "gpio-keys")) {
             score += 4;
         }
         score += hint_score;

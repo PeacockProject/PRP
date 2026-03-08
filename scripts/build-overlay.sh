@@ -222,8 +222,12 @@ fi
 ln -snf /usr/bin/dbclient "$STAGE_DIR/usr/bin/ssh"
 chmod +x "$STAGE_DIR/usr/sbin/dropbear" "$STAGE_DIR/usr/sbin/dropbearkey" "$STAGE_DIR/usr/bin/dbclient" "$STAGE_DIR/usr/bin/scp" 2>/dev/null || true
 
-# Keep PRP's framebuffer helpers available even when /usr is bind-mounted from overlay.
-for f in peacock-splash msm-fb-refresher; do
+# Keep framebuffer helpers available even when /usr is bind-mounted from overlay.
+overlay_fb_helpers=(peacock-splash)
+if [[ "${USE_FB_REFRESHER:-0}" == "1" && "${IS_MSM_FB_REFRESHER:-0}" == "1" ]]; then
+  overlay_fb_helpers+=(msm-fb-refresher)
+fi
+for f in "${overlay_fb_helpers[@]}"; do
   if [[ -x "$VENDOR_RUNTIME/usr/bin/$f" ]]; then
     cp -a "$VENDOR_RUNTIME/usr/bin/$f" "$STAGE_DIR/usr/bin/$f"
     chmod +x "$STAGE_DIR/usr/bin/$f"

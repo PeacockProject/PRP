@@ -106,7 +106,6 @@ copy_from_rootfs() {
 # Subpartition mounting uses busybox loop-offset support from initramfs/TWRP assets.
 rootfs_bins=(
   /usr/bin/peacock-splash
-  /usr/bin/msm-fb-refresher
   /usr/sbin/dropbear
   /usr/sbin/dropbearkey
   /usr/bin/dbclient
@@ -116,6 +115,10 @@ rootfs_bins=(
   /sbin/fdisk
   /sbin/blkid
 )
+
+if [[ "${USE_FB_REFRESHER:-0}" == "1" && "${IS_MSM_FB_REFRESHER:-0}" == "1" ]]; then
+  rootfs_bins+=(/usr/bin/msm-fb-refresher)
+fi
 
 for rel in "${rootfs_bins[@]}"; do
   copy_from_rootfs "$rel"
