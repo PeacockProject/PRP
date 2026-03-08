@@ -735,8 +735,8 @@ draw_splash() {
 
 start_fb_refresher() {
   [ "$ENABLE_FB_IO" = "1" ] || { FB_REFRESHER_STATE="disabled"; return 0; }
-  # Mirror lk2nd "cont-splash" behavior in userspace:
-  # keep fb unblanked and backlight forced on while recovery is active.
+  # Optional generic display keepalive: keep fb unblanked and backlight forced
+  # on while recovery is active, independent of any platform-specific helper.
   if [ "${DISPLAY_KEEPALIVE:-1}" = "1" ]; then
     (
       while true; do
@@ -752,7 +752,7 @@ start_fb_refresher() {
   elif [ "$USE_FB_REFRESHER" = "1" ]; then
     FB_REFRESHER_STATE="keepalive-only"
   else
-    FB_REFRESHER_STATE="keepalive-only-no-msmfb"
+    FB_REFRESHER_STATE="keepalive-only-no-helper"
   fi
 }
 
@@ -764,17 +764,17 @@ if [ "$DEBUG_BOOT" != "1" ]; then
   draw_splash
   pmsg_mark "stage=after-draw-splash"
   if [ "$FB_REFRESHER_STATE" = "started" ]; then
-    log "msm-fb-refresher started (loop)"
+    log "fb refresher helper started (loop)"
   elif [ "$FB_REFRESHER_STATE" = "started+keepalive" ]; then
-    log "msm-fb-refresher started (loop) + display keepalive"
+    log "fb refresher helper started (loop) + display keepalive"
   elif [ "$FB_REFRESHER_STATE" = "keepalive-only" ]; then
-    log "msm-fb-refresher not present; using display keepalive"
-  elif [ "$FB_REFRESHER_STATE" = "keepalive-only-no-msmfb" ]; then
-    log "msm-fb-refresher disabled for this device; using display keepalive"
+    log "fb refresher helper requested but not present; using display keepalive"
+  elif [ "$FB_REFRESHER_STATE" = "keepalive-only-no-helper" ]; then
+    log "fb refresher helper disabled by profile; using display keepalive"
   elif [ "$FB_REFRESHER_STATE" = "disabled" ]; then
     log "fb activity disabled by config"
   elif [ "$FB_REFRESHER_STATE" = "missing" ]; then
-    log "msm-fb-refresher not present"
+    log "fb refresher helper not present"
   fi
 else
   pmsg_mark "stage=debug-skip-display"

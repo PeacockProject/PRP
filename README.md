@@ -38,6 +38,13 @@ For A/B devices using lk2nd split-boot layout, set these in the device config:
 - `FASTBOOT_BOOT_PARTITION=boot`
 - `FASTBOOT_LK2ND_PARTITION=lk2nd`
 
+Device profiles should keep Qualcomm/MSM quirks explicit:
+- `IS_MSM=1` for Qualcomm/MSM-based targets
+- `IS_MSM_FB_REFRESHER=1` only when `msm-fb-refresher` is applicable
+- `IS_MSM_LK2ND_SPLIT_BOOT=1` only when the device actually uses the lk2nd split-boot layout
+
+These flags let the generic PRP paths stay platform-neutral while still enabling MSM-specific helpers from the profile.
+
 In this mode `flash-recovery` requires lk2nd fastboot (must expose `partition-size:lk2nd`).
 
 Headless debug boot (skip display/UI, bring up RNDIS shell early):

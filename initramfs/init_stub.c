@@ -16,38 +16,6 @@ static void kmsg(const char *msg) {
     }
 }
 
-static void start_fb_refresher_early(void) {
-    const char *bin = NULL;
-    pid_t pid;
-    int i;
-
-    if (access("/sbin/msm-fb-refresher", X_OK) == 0) {
-        bin = "/sbin/msm-fb-refresher";
-    } else if (access("/usr/bin/msm-fb-refresher", X_OK) == 0) {
-        bin = "/usr/bin/msm-fb-refresher";
-    } else {
-        return;
-    }
-
-    pid = fork();
-    if (pid != 0)
-        return;
-
-    for (i = 0; i < 80; i++) {
-        if (access("/dev/fb0", R_OK | W_OK) == 0 ||
-            access("/dev/graphics/fb0", R_OK | W_OK) == 0)
-            break;
-        usleep(50000);
-    }
-
-    {
-        char *argv[] = {(char *)bin, "--loop", NULL};
-        execv(bin, argv);
-    }
-
-    _exit(0);
-}
-
 int main(void) {
     (void)mkdir("/proc", 0755);
     (void)mkdir("/sys", 0755);

@@ -250,7 +250,12 @@ if [[ "$peacock_splash_ok" != "1" ]]; then
   chmod +x "$STAGE_DIR/usr/bin/peacock-splash"
 fi
 
-# msm-fb-refresher is device-specific; keep it enabled only where configured.
+# `msm-fb-refresher` is Qualcomm/MSM-specific. Keep it behind profile flags so
+# the generic initramfs path stays platform-neutral.
+if [[ "${USE_FB_REFRESHER:-0}" == "1" && "${IS_MSM_FB_REFRESHER:-0}" != "1" ]]; then
+  die "USE_FB_REFRESHER=1 requires IS_MSM_FB_REFRESHER=1 in the device profile"
+fi
+
 if [[ "${USE_FB_REFRESHER:-0}" == "1" ]]; then
   if [[ ! -x "$STAGE_DIR/usr/bin/msm-fb-refresher" ]]; then
     FB_TOOL_DIR="$OUT_DIR/tools/fb-refresher/${TARGET_ARCH}"
