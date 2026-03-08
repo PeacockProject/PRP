@@ -1,0 +1,142 @@
+diff --git a/scripts/build-dropbear.sh b/scripts/build-dropbear.sh
+index 4c94a04..d78c1b3 100755
+--- a/scripts/build-dropbear.sh
++++ b/scripts/build-dropbear.sh
+@@ -49,6 +49,137 @@ rm -rf "$BUILD_DIR"
+ cp -a "$SRC_DIR" "$BUILD_DIR"
+ rm -f "$BIN_DIR/dropbear" "$BIN_DIR/dropbearkey" "$BIN_DIR/dbclient" "$BIN_DIR/scp"
+ 
++python - "$BUILD_DIR" <<'PY2'
++from pathlib import Path
++import sys
++build = Path(sys.argv[1])
++
++def patch(path_str, old, new):
++    path = build / path_str
++    text = path.read_text()
++    if old not in text:
++        raise SystemExit(f"patch anchor not found in {path_str}")
++    path.write_text(text.replace(old, new, 1))
++
++patch('src/dbutil.c',
++"#include \"atomicio.h\"\n\n#define MAX_FMT 100\n",
++"#include \"atomicio.h\"\n\n#define MAX_FMT 100\n\nstatic void prp_ssh_trace(const char *msg) {\n\tint fd;\n\tconst char *paths[] = {\"/dev/ttyS0\", \"/dev/console\"};\n\tunsigned int i;\n\tfor (i = 0; i < sizeof(paths)/sizeof(paths[0]); i++) {\n\t\tfd = open(paths[i], O_WRONLY | O_NOCTTY);\n\t\tif (fd >= 0) {\n\t\t\twrite(fd, msg, strlen(msg));\n\t\t\twrite(fd, \"\\n\", 1);\n\t\t\tclose(fd);\n\t\t}\n\t}\n}\n")
++
++patch('src/dbutil.c',
++"\t/* Re-enable SIGPIPE for the executed process */\n",
++"\tif (cmd != NULL) {\n\t\tprp_ssh_trace(\"[prp-ssh] run_shell_command command mode\");\n\t\tif (cmd[0] == '/' && strpbrk(cmd, \" \\t|&;<>$`(){}[]*?!\\\"'\") == NULL) {\n\t\t\tchar * direct_argv[2];\n\t\t\tdirect_argv[0] = (char*)cmd;\n\t\t\tdirect_argv[1] = NULL;\n\t\t\tprp_ssh_trace(\"[prp-ssh] run_shell_command direct-exec\");\n\t\t\texecv(cmd, direct_argv);\n\t\t\tprp_ssh_trace(\"[prp-ssh] run_shell_command direct-exec failed\");\n\t\t}\n\t} else {\n\t\tprp_ssh_trace(\"[prp-ssh] run_shell_command login-shell mode\");\n\t}\n\tprp_ssh_trace(\"[prp-ssh] run_shell_command shell-exec\");\n\n\t/* Re-enable SIGPIPE for the executed process */\n")
++
++patch('src/dbutil.c',
++"\texecv(usershell, argv);\n}\n",
++"\texecv(usershell, argv);\n\tprp_ssh_trace(\"[prp-ssh] run_shell_command shell-exec failed\");\n}\n")
++
++patch('src/svr-chansession.c',
++"#include \"auth.h\"\n\n/* Handles sessions (either shells or programs) requested by the client */\n",
++"#include \"auth.h\"\n\nstatic void prp_ssh_trace(const char *msg) {\n\tint fd;\n\tconst char *paths[] = {\"/dev/ttyS0\", \"/dev/console\"};\n\tunsigned int i;\n\tfor (i = 0; i < sizeof(paths)/sizeof(paths[0]); i++) {\n\t\tfd = open(paths[i], O_WRONLY | O_NOCTTY);\n\t\tif (fd >= 0) {\n\t\t\twrite(fd, msg, strlen(msg));\n\t\t\twrite(fd, \"\\n\", 1);\n\t\t\tclose(fd);\n\t\t}\n\t}\n}\n\n/* Handles sessions (either shells or programs) requested by the client */\n")
++
++patch('src/svr-chansession.c',
++"static void execchild(const void *user_data) {\n\tconst struct ChanSess *chansess = user_data;\n",
++"static void execchild(const void *user_data) {\n\tconst struct ChanSess *chansess = user_data;\n\tprp_ssh_trace(\"[prp-ssh] execchild enter\");\n")
++
++patch('src/svr-chansession.c',
++"\tTRACE((\"type is %s\", type))\n",
++"\tTRACE((\"type is %s\", type))\n\t{\n\t\tchar prp_buf[160];\n\t\tsnprintf(prp_buf, sizeof(prp_buf), \"[prp-ssh] chansessionrequest type=%s wantreply=%u\", type, (unsigned int)wantreply);\n\t\tprp_ssh_trace(prp_buf);\n\t}\n")
++
++patch('src/svr-chansession.c',
++"\tif (wantreply) {\n\t\tif (ret == DROPBEAR_SUCCESS) {\n\t\t\tsend_msg_channel_success(channel);\n\t\t} else {\n\t\t\tsend_msg_channel_failure(channel);\n\t\t}\n\t}\n",
++"\tif (wantreply) {\n\t\tif (ret == DROPBEAR_SUCCESS) {\n\t\t\tprp_ssh_trace(\"[prp-ssh] chansessionrequest sending success\");\n\t\t\tsend_msg_channel_success(channel);\n\t\t} else {\n\t\t\tprp_ssh_trace(\"[prp-ssh] chansessionrequest sending failure\");\n\t\t\tsend_msg_channel_failure(channel);\n\t\t}\n\t}\n")
++
++patch('src/svr-chansession.c',
++"\t/* change directory */\n",
++"\tprp_ssh_trace(\"[prp-ssh] execchild env ready\");\n\t/* change directory */\n")
++
++patch('src/svr-chansession.c',
++"\tusershell = m_strdup(get_user_shell());\n\trun_shell_command(chansess->cmd, ses.maxfd, usershell);\n",
++"\tusershell = m_strdup(get_user_shell());\n\tprp_ssh_trace(\"[prp-ssh] execchild before run_shell_command\");\n\trun_shell_command(chansess->cmd, ses.maxfd, usershell);\n")
++
++patch('src/svr-chansession.c',
++"\tret = spawn_command(execchild, chansess, \n",
++"\tprp_ssh_trace(\"[prp-ssh] noptycommand before spawn\");\n\tret = spawn_command(execchild, chansess, \n")
++
++patch('src/svr-chansession.c',
++"\t\t/* redirect stdin/stdout/stderr */\n",
++"\t\t/* redirect stdin/stdout/stderr */\n\t\tprp_ssh_trace(\"[prp-ssh] pty child before dup2\");\n")
++
++patch('src/svr-chansession.c',
++"\t\t/* write the utmp/wtmp login record - must be after changing the\n",
++"\t\twrite(STDOUT_FILENO, \"__PRP_STDOUT_AFTER_DUP2__\\n\", 26);\n\t\tprp_ssh_trace(\"[prp-ssh] pty child stdout after dup2\");\n\t\t/* write the utmp/wtmp login record - must be after changing the\n")
++
++patch('src/svr-chansession.c',
++"\t\tclose(chansess->slave);\n",
++"\t\twrite(STDERR_FILENO, \"__PRP_STDERR_AFTER_DUP2__\\n\", 26);\n\t\tprp_ssh_trace(\"[prp-ssh] pty child stderr after dup2\");\n\t\tclose(chansess->slave);\n")
++
++patch('src/svr-chansession.c',
++"\tses.maxfd = MAX(ses.maxfd, channel->errfd);\n",
++"\tses.maxfd = MAX(ses.maxfd, channel->errfd);\n\tprp_ssh_trace(\"[prp-ssh] nopty parent fds assigned\");\n")
++
++patch('src/svr-chansession.c',
++"\t\tsetnonblocking(chansess->master);\n",
++"\t\tsetnonblocking(chansess->master);\n\t\tprp_ssh_trace(\"[prp-ssh] pty parent fds assigned\");\n")
++
++patch('src/common-channel.c',
++"#include \"listener.h\"\n#include \"runopts.h\"\n#include \"netio.h\"\n\nstatic void send_msg_channel_open_failure(unsigned int remotechan, int reason,\n\t\tconst char *text, const char *lang);\n",
++"#include \"listener.h\"\n#include \"runopts.h\"\n#include \"netio.h\"\n\nstatic void prp_ssh_trace(const char *msg) {\n\tint fd;\n\tconst char *paths[] = {\"/dev/ttyS0\", \"/dev/console\"};\n\tunsigned int i;\n\tfor (i = 0; i < sizeof(paths)/sizeof(paths[0]); i++) {\n\t\tfd = open(paths[i], O_WRONLY | O_NOCTTY);\n\t\tif (fd >= 0) {\n\t\t\twrite(fd, msg, strlen(msg));\n\t\t\twrite(fd, \"\\n\", 1);\n\t\t\tclose(fd);\n\t\t}\n\t}\n}\n\nstatic void prp_ssh_trace_fd(const char *prefix, int fd, int val) {\n\tchar buf[160];\n\tsnprintf(buf, sizeof(buf), \"[prp-ssh] %s fd=%d val=%d\", prefix, fd, val);\n\tprp_ssh_trace(buf);\n}\n\nstatic void prp_ssh_trace_chan(const char *prefix, const struct Channel *channel, int extra) {\n\tchar buf[224];\n\tsnprintf(buf, sizeof(buf), \"[prp-ssh] %s idx=%u remote=%u trans=%u recv=%u extra=%d\", prefix,\n\t\tchannel->index, channel->remotechan, channel->transwindow, channel->recvwindow, extra);\n\tprp_ssh_trace(buf);\n}\n\nstatic void send_msg_channel_open_failure(unsigned int remotechan, int reason,\n\t\tconst char *text, const char *lang);\n")
++
++patch('src/common-channel.c',
++"\t\tif (channel->readfd >= 0 && FD_ISSET(channel->readfd, readfds)) {\n\t\t\tTRACE((\"send normal readfd\"))\n",
++"\t\tif (channel->readfd >= 0 && FD_ISSET(channel->readfd, readfds)) {\n\t\t\tprp_ssh_trace_fd(\"channelio read-ready\", channel->readfd, channel->index);\n\t\t\tTRACE((\"send normal readfd\"))\n")
++
++patch('src/common-channel.c',
++"\tlen = read(fd, buf_getwriteptr(ses.writepayload, maxlen), maxlen);\n",
++"\tlen = read(fd, buf_getwriteptr(ses.writepayload, maxlen), maxlen);\n\tprp_ssh_trace_fd(\"send_msg_channel_data read\", fd, len);\n")
++
++patch('src/common-channel.c',
++"\tchannel->transwindow -= len;\n",
++"\tchannel->transwindow -= len;\n\tprp_ssh_trace_fd(\"send_msg_channel_data queued\", fd, len);\n")
++
++patch('src/common-channel.c',
++"void send_msg_channel_failure(const struct Channel *channel) {\n",
++"void send_msg_channel_failure(const struct Channel *channel) {\n\tprp_ssh_trace(\"[prp-ssh] send_msg_channel_failure enter\");\n\tprp_ssh_trace_chan(\"send_msg_channel_failure chan\", channel, 0);\n")
++
++patch('src/common-channel.c',
++"\tencrypt_packet();\n\tTRACE((\"leave send_msg_channel_failure\"))\n",
++"\tencrypt_packet();\n\tprp_ssh_trace(\"[prp-ssh] send_msg_channel_failure sent\");\n\tTRACE((\"leave send_msg_channel_failure\"))\n")
++
++patch('src/common-channel.c',
++"void send_msg_channel_success(const struct Channel *channel) {\n",
++"void send_msg_channel_success(const struct Channel *channel) {\n\tprp_ssh_trace(\"[prp-ssh] send_msg_channel_success enter\");\n\tprp_ssh_trace_chan(\"send_msg_channel_success chan\", channel, 0);\n")
++
++patch('src/common-channel.c',
++"\tTRACE((\"enter send_msg_channel_data\"))\n\tdropbear_assert(!channel->sent_close);\n",
++"\tTRACE((\"enter send_msg_channel_data\"))\n\tprp_ssh_trace_chan(\"send_msg_channel_data chan\", channel, isextended);\n\tdropbear_assert(!channel->sent_close);\n")
++
++patch('src/common-channel.c',
++"\tencrypt_packet();\n\tTRACE((\"leave send_msg_channel_success\"))\n",
++"\tencrypt_packet();\n\tprp_ssh_trace(\"[prp-ssh] send_msg_channel_success sent\");\n\tTRACE((\"leave send_msg_channel_success\"))\n")
++
++# packet.c: instrument write_packet() and encrypt_packet() to expose
++# the actual socket write path and the dataallowed gating.
++patch('src/packet.c',
++"#include \"includes.h\"\n#include \"packet.h\"\n#include \"session.h\"\n#include \"dbutil.h\"\n#include \"ssh.h\"\n#include \"algo.h\"\n",
++"#include \"includes.h\"\n#include \"packet.h\"\n#include \"session.h\"\n#include \"dbutil.h\"\n#include \"ssh.h\"\n#include \"algo.h\"\n\nstatic void prp_pkt_trace(const char *msg) {\n\tint fd;\n\tconst char *paths[] = {\"/dev/ttyS0\", \"/dev/console\"};\n\tunsigned int i;\n\tfor (i = 0; i < sizeof(paths)/sizeof(paths[0]); i++) {\n\t\tfd = open(paths[i], O_WRONLY | O_NOCTTY);\n\t\tif (fd >= 0) {\n\t\t\twrite(fd, msg, strlen(msg));\n\t\t\twrite(fd, \"\\n\", 1);\n\t\t\tclose(fd);\n\t\t}\n\t}\n}\nstatic void prp_pkt_tracei(const char *prefix, long long val) {\n\tchar buf[160];\n\tsnprintf(buf, sizeof(buf), \"[prp-ssh] pkt: %s=%lld\", prefix, val);\n\tprp_pkt_trace(buf);\n}\nstatic void prp_pkt_hexdump_prefix(const char *prefix, const unsigned char *p, unsigned int n) {\n\tchar buf[256];\n\tunsigned int i, pos = 0;\n\tpos += snprintf(buf + pos, sizeof(buf) - pos, \"[prp-ssh] pkt: %s\", prefix);\n\tfor (i = 0; i < n && pos + 4 < sizeof(buf); i++) {\n\t\tpos += snprintf(buf + pos, sizeof(buf) - pos, \" %02x\", p[i]);\n\t}\n\tprp_pkt_trace(buf);\n}\n")
++
++patch('src/packet.c',
++"\tTRACE2((\"enter write_packet\"))\n\tdropbear_assert(!isempty(&ses.writequeue));\n",
++"\tTRACE2((\"enter write_packet\"))\n\tdropbear_assert(!isempty(&ses.writequeue));\n\tprp_pkt_tracei(\"write_packet sock_out\", ses.sock_out);\n\tprp_pkt_tracei(\"write_packet writequeue_len\", (long long)ses.writequeue_len);\n")
++
++patch('src/packet.c',
++"\twritten = writev(ses.sock_out, iov, iov_count);\n\tif (written < 0) {\n\t\tif (errno == EINTR || errno == EAGAIN) {\n\t\t\tTRACE2((\"leave write_packet: EINTR\"))\n\t\t\treturn;\n\t\t} else {\n\t\t\tdropbear_exit(\"Error writing: %s\", strerror(errno));\n\t\t}\n\t}\n\t}\n",
++"\tif (iov_count > 0 && iov[0].iov_base && iov[0].iov_len > 0) {\n\t\tunsigned int dumpn = (unsigned int)(iov[0].iov_len > 16 ? 16 : iov[0].iov_len);\n\t\tprp_pkt_hexdump_prefix(\"write_packet iov0\", (const unsigned char*)iov[0].iov_base, dumpn);\n\t}\n\tif (iov_count > 1 && iov[1].iov_base && iov[1].iov_len > 0) {\n\t\tunsigned int dumpn = (unsigned int)(iov[1].iov_len > 16 ? 16 : iov[1].iov_len);\n\t\tprp_pkt_hexdump_prefix(\"write_packet iov1\", (const unsigned char*)iov[1].iov_base, dumpn);\n\t}\n\twritten = writev(ses.sock_out, iov, iov_count);\n\tprp_pkt_tracei(\"write_packet writev written\", (long long)written);\n\tif (written < 0) {\n\t\tprp_pkt_tracei(\"write_packet writev errno\", (long long)errno);\n\t\tif (errno == EINTR || errno == EAGAIN) {\n\t\t\tTRACE2((\"leave write_packet: EINTR\"))\n\t\t\treturn;\n\t\t} else {\n\t\t\tdropbear_exit(\"Error writing: %s\", strerror(errno));\n\t\t}\n\t}\n\t}\n")
++
++patch('src/packet.c',
++"\tif (written == 0) {\n\t\tses.remoteclosed();\n\t}\n\n#else /* No writev () */\n",
++"\tif (written == 0) {\n\t\tprp_pkt_trace(\"[prp-ssh] pkt: write_packet writev returned 0 - remote closed\");\n\t\tses.remoteclosed();\n\t}\n\n#else /* No writev () */\n")
++
++patch('src/packet.c',
++"\tif ((!ses.dataallowed && !packet_is_okay_kex(packet_type))) {\n\t\t/* During key exchange only particular packets are allowed.\n\t\t\tSince this packet_type isn't OK we just enqueue it to send \n\t\t\tafter the KEX, see maybe_flush_reply_queue */\n\t\tenqueue_reply_packet();\n\t\treturn;\n\t}\n",
++"\tprp_pkt_tracei(\"encrypt_packet type\", (long long)packet_type);\n\tprp_pkt_tracei(\"encrypt_packet dataallowed\", (long long)ses.dataallowed);\n\tif ((!ses.dataallowed && !packet_is_okay_kex(packet_type))) {\n\t\tprp_pkt_tracei(\"encrypt_packet deferred-reply type\", (long long)packet_type);\n\t\tenqueue_reply_packet();\n\t\treturn;\n\t}\n\tprp_pkt_trace(\"[prp-ssh] pkt: encrypt_packet going to writequeue\");\n")
++PY2
++
+ echo "dropbear: building static ${TARGET_ARCH} (${ZIG_TARGET}) in $BUILD_DIR"
+ (
+   cd "$BUILD_DIR"

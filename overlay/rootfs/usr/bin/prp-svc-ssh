@@ -5,6 +5,16 @@ PORT="${PRP_SSH_PORT:-2222}"
 KEYDIR="${PRP_SSH_KEYDIR:-/etc/dropbear}"
 HOSTKEY="${KEYDIR}/dropbear_rsa_host_key"
 ALLOW_BLANK="${PRP_SSH_ALLOW_BLANK_PASSWORD:-1}"
+FORCE_COMMAND="${PRP_SSH_FORCE_COMMAND:-}"
+
+prp_ssh_log() {
+  local msg="[prp-ssh] $*"
+  printf '%s\n' "$msg" > /dev/kmsg 2>/dev/null || true
+  printf '%s\n' "$msg" > /dev/console 2>/dev/null || true
+  printf '%s\n' "$msg" > /dev/ttyS0 2>/dev/null || true
+}
+
+prp_ssh_log "svc start port=$PORT blank=$ALLOW_BLANK"
 
 mkdir -p /etc "$KEYDIR" /root/.ssh /var/run
 mkdir -p /dev/pts /bin
@@ -14,10 +24,15 @@ if [ ! -s /root/.ssh/authorized_keys ] && [ -s "${KEYDIR}/authorized_keys" ]; th
 fi
 chmod 0700 /root/.ssh 2>/dev/null || true
 chmod 0600 /root/.ssh/authorized_keys 2>/dev/null || true
+if [ -s /root/.ssh/authorized_keys ]; then
+  prp_ssh_log "authorized_keys present"
+else
+  prp_ssh_log "authorized_keys missing"
+fi
 
 # Keep this standalone even when called from the GUI button directly.
-shell_path="/bin/sh"
-[ -x /usr/bin/prp-login-sh ] && shell_path="/usr/bin/prp-login-sh"
+# Force plain /bin/sh for now to isolate post-auth hangs from prp-login-sh.
+shell_path="/usr/bin/prp-shell-wrapper"
 if [ "$ALLOW_BLANK" = "1" ]; then
   printf 'root::0:0:root:/root:%s\n' "$shell_path" > /etc/passwd
 else
@@ -26,6 +41,7 @@ fi
 if [ ! -s /etc/group ]; then
   echo 'root:x:0:' > /etc/group
 fi
+prp_ssh_log "passwd shell=$shell_path"
 
 # Dropbear checks shell validity against /etc/shells.
 {
@@ -33,10 +49,16 @@ fi
   echo /bin/ash
   echo "$shell_path"
 } > /etc/shells
+prp_ssh_log "shells ready"
 
 # Ensure an interactive shell is executable for SSH sessions.
 if [ ! -x /bin/sh ] && [ -x /sbin/busybox ]; then
   ln -snf /sbin/busybox /bin/sh 2>/dev/null || true
+fi
+if [ -x /bin/sh ]; then
+  prp_ssh_log "/bin/sh executable"
+else
+  prp_ssh_log "/bin/sh missing"
 fi
 
 # Ensure PTY infrastructure exists (needed for interactive ssh shell/tty).
@@ -46,16 +68,20 @@ fi
 if [ ! -e /dev/ptmx ]; then
   ln -snf /dev/pts/ptmx /dev/ptmx 2>/dev/null || mknod /dev/ptmx c 5 2 2>/dev/null || true
 fi
+prp_ssh_log "pty infra ready"
 
 if [ ! -s "$HOSTKEY" ]; then
+  prp_ssh_log "hostkey missing, generating"
   if [ -x /usr/sbin/dropbearkey ]; then
     /usr/sbin/dropbearkey -t rsa -s 2048 -f "$HOSTKEY" >/tmp/dropbearkey.log 2>&1 || true
   fi
 fi
 if [ ! -s "$HOSTKEY" ]; then
+  prp_ssh_log "hostkey generation failed"
   echo "prp-svc-ssh: hostkey missing (see /tmp/dropbearkey.log)" >&2
   exit 1
 fi
+prp_ssh_log "hostkey ready"
 
 killall dropbear >/dev/null 2>&1 || true
 args="-p $PORT -r $HOSTKEY"
@@ -66,8 +92,13 @@ else
   # Key-only.
   args="$args -s"
 fi
+if [ -n "$FORCE_COMMAND" ]; then
+  args="$args -c $FORCE_COMMAND"
+  prp_ssh_log "force command=$FORCE_COMMAND"
+fi
 if [ "${PRP_SSH_FOREGROUND:-0}" = "1" ]; then
   args="$args -F"
 fi
+prp_ssh_log "exec dropbear args=$args"
 echo "prp-svc-ssh: port=$PORT blank=$ALLOW_BLANK shell=$shell_path" >&2
 exec /usr/sbin/dropbear $args

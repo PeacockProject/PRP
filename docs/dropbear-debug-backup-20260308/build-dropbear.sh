@@ -20,9 +20,6 @@ OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 
 DROPBEAR_VER="${DROPBEAR_VER:-2024.86}"
 DROPBEAR_STRIP="${DROPBEAR_STRIP:-0}"
-DROPBEAR_PATCH_MODE="${DROPBEAR_PATCH_MODE:-instrumented}"
-DROPBEAR_CC_MODE="${DROPBEAR_CC_MODE:-zig}"
-DROPBEAR_OPT_LEVEL="${DROPBEAR_OPT_LEVEL:-2}"
 TARBALL_URL="https://matt.ucc.asn.au/dropbear/releases/dropbear-${DROPBEAR_VER}.tar.bz2"
 
 TOOLS_DIR="$OUT_DIR/tools"
@@ -52,7 +49,6 @@ rm -rf "$BUILD_DIR"
 cp -a "$SRC_DIR" "$BUILD_DIR"
 rm -f "$BIN_DIR/dropbear" "$BIN_DIR/dropbearkey" "$BIN_DIR/dbclient" "$BIN_DIR/scp"
 
-if [[ "$DROPBEAR_PATCH_MODE" != "vanilla" ]]; then
 python - "$BUILD_DIR" <<'PY2'
 from pathlib import Path
 import sys
@@ -183,42 +179,17 @@ patch('src/packet.c',
 "\tif ((!ses.dataallowed && !packet_is_okay_kex(packet_type))) {\n\t\t/* During key exchange only particular packets are allowed.\n\t\t\tSince this packet_type isn't OK we just enqueue it to send \n\t\t\tafter the KEX, see maybe_flush_reply_queue */\n\t\tenqueue_reply_packet();\n\t\treturn;\n\t}\n",
 "\tprp_pkt_tracei(\"encrypt_packet type\", (long long)packet_type);\n\tprp_pkt_tracei(\"encrypt_packet dataallowed\", (long long)ses.dataallowed);\n\tif ((!ses.dataallowed && !packet_is_okay_kex(packet_type))) {\n\t\tprp_pkt_tracei(\"encrypt_packet deferred-reply type\", (long long)packet_type);\n\t\tenqueue_reply_packet();\n\t\treturn;\n\t}\n\tprp_pkt_trace(\"[prp-ssh] pkt: encrypt_packet going to writequeue\");\n")
 PY2
-fi
 
-cc_desc="${ZIG_TARGET}"
+echo "dropbear: building static ${TARGET_ARCH} (${ZIG_TARGET}) in $BUILD_DIR"
 (
   cd "$BUILD_DIR"
 
-  case "$DROPBEAR_CC_MODE" in
-    zig)
-      export CC="zig cc -target ${ZIG_TARGET}"
-      export AR="zig ar"
-      export RANLIB="zig ranlib"
-      cc_desc="${ZIG_TARGET}"
-      ;;
-    muslcc)
-      source /etc/profile.d/arm-linux-musleabihf-cross.sh
-      require_cmd arm-linux-musleabihf-gcc
-      export CC="arm-linux-musleabihf-gcc"
-      export AR="arm-linux-musleabihf-ar"
-      export RANLIB="arm-linux-musleabihf-ranlib"
-      cc_desc="arm-linux-musleabihf-gcc"
-      ;;
-    *)
-      die "unsupported DROPBEAR_CC_MODE: $DROPBEAR_CC_MODE"
-      ;;
-  esac
+  export CC="zig cc -target ${ZIG_TARGET}"
+  export AR="zig ar"
+  export RANLIB="zig ranlib"
   # Conservative flags to avoid optimizer/strip-induced instability on target.
-  export CFLAGS="-O${DROPBEAR_OPT_LEVEL} -fno-omit-frame-pointer"
+  export CFLAGS="-O2 -fno-omit-frame-pointer"
   export LDFLAGS="-static"
-  if [[ "$DROPBEAR_CC_MODE" == "muslcc" ]]; then
-    # The muslcc wrapper's built-in sysroot lacks libc.a on this host.
-    # The Arch `armhf-musl` package provides the static musl sysroot we need.
-    export CPPFLAGS="-I/usr/lib/armhf-musl/include"
-    export LDFLAGS="-static -L/usr/lib/armhf-musl/lib"
-  fi
-
-  echo "dropbear: building static ${TARGET_ARCH} (${cc_desc}) in $BUILD_DIR (patch_mode=${DROPBEAR_PATCH_MODE}, cc_mode=${DROPBEAR_CC_MODE}, opt=${DROPBEAR_OPT_LEVEL})"
 
   ./configure \
     --host="${DROPBEAR_HOST}" \

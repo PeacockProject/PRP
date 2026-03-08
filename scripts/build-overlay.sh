@@ -19,6 +19,7 @@ mkdir -p "$OUT_DIR"
 
 OVERLAY_SIZE_MB="${OVERLAY_SIZE_MB:-60}"
 OVERLAY_LABEL="${OVERLAY_LABEL:-PRP_ROOTFS}"
+PRP_OVERLAY_STAGE_ONLY="${PRP_OVERLAY_STAGE_ONLY:-0}"
 # jflte's 3.4 kernel can't mount modern ext4 features (metadata_csum/64bit/orphan_file).
 # Keep those feature masks device-specific so modern devices get normal ext4 defaults.
 if [[ -z "${OVERLAY_EXT4_OPTS+x}" ]]; then
@@ -67,7 +68,7 @@ if [[ ! -f "$STAGE_DIR/etc/prp-gui.conf" ]]; then
 #   INPUT=/dev/input/eventX
 #   POWER_INPUT=/dev/input/eventY
 #   SCALE=100   (50..200)
-#   LOGO=/mnt/prp_rootfs/etc/prp/header_logo.png
+#   LOGO=/etc/prp/header_logo.png
 #
 # Leave FBDEV/INPUT unset to auto-detect.
 
@@ -289,6 +290,11 @@ if [[ -d "$HOME/.ssh" ]]; then
 fi
 
 # Create ext4 image populated from a tarball so we can force numeric root ownership without sudo.
+if [[ "$PRP_OVERLAY_STAGE_ONLY" == "1" ]]; then
+  echo "overlay-stage: $STAGE_DIR"
+  exit 0
+fi
+
 rm -f "$IMG"
 dd if=/dev/zero of="$IMG" bs=1M count="$OVERLAY_SIZE_MB" status=none
 

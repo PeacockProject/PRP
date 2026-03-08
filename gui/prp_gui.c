@@ -652,17 +652,17 @@ static void build_ui(void) {
     lv_obj_set_style_border_width(sep, 0, 0);
     lv_obj_set_style_radius(sep, 0, 0);
 
-    // Optional logo image loaded from disk (decoded from PRP_ROOTFS at runtime).
+    // Optional logo image loaded from the prepared PRP runtime.
     if(!g_logo_dsc) {
         const char *paths[12];
         size_t pi = 0;
         if(g_logo_path[0]) paths[pi++] = g_logo_path;
-        paths[pi++] = "/mnt/prp_rootfs/etc/prp/header_logo.png";
-        paths[pi++] = "/mnt/prp_rootfs/etc/prp/logo_header.png";
-        paths[pi++] = "/mnt/prp_rootfs/etc/header_logo.png";
         paths[pi++] = "/etc/prp/header_logo.png";
         paths[pi++] = "/etc/prp/logo_header.png";
         paths[pi++] = "/etc/header_logo.png";
+        paths[pi++] = "/mnt/prp_rootfs/etc/prp/header_logo.png";
+        paths[pi++] = "/mnt/prp_rootfs/etc/prp/logo_header.png";
+        paths[pi++] = "/mnt/prp_rootfs/etc/header_logo.png";
         paths[pi++] = "header_logo.png";
         paths[pi++] = "logo_header.png";
         paths[pi] = NULL;
@@ -925,10 +925,12 @@ int main(int argc, char **argv) {
     cfg_init(&cfg);
     cfg_apply_env(&cfg);
 
-    // Default search path (persistent config is stored on PRP_ROOTFS).
-    snprintf(cfg.config_path, sizeof(cfg.config_path), "%s", "/mnt/prp_rootfs/etc/prp-gui.conf");
+    // Default search path prefers the active runtime, then falls back to compatibility paths.
+    snprintf(cfg.config_path, sizeof(cfg.config_path), "%s", "/etc/prp-gui.conf");
     cfg_load_file(&cfg, cfg.config_path);
+    cfg_load_file(&cfg, "/etc/prp/prp-gui.conf");
     cfg_load_file(&cfg, "/etc/prp-gui.conf");
+    cfg_load_file(&cfg, "/mnt/prp_rootfs/etc/prp-gui.conf");
 
     for(int i = 1; i < argc; i++) {
         if(strcmp(argv[i], "--help") == 0) {

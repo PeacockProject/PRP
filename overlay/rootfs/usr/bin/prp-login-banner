@@ -3,8 +3,8 @@ set -eu
 
 print_motd() {
   for p in \
-    /mnt/prp_rootfs/etc/prp/motd.txt \
     /etc/prp/motd.txt \
+    /mnt/prp_rootfs/etc/prp/motd.txt \
     /etc/motd; do
     if [ -s "$p" ]; then
       cat "$p"

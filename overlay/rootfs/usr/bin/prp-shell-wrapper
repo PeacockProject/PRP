@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+prp_ssh_log() {
+  local msg="[prp-ssh] $*"
+  printf '%s\n' "$msg" > /dev/kmsg 2>/dev/null || true
+  printf '%s\n' "$msg" > /dev/console 2>/dev/null || true
+  printf '%s\n' "$msg" > /dev/ttyS0 2>/dev/null || true
+}
+prp_ssh_log "shell-wrapper enter"
+printf '__PRP_SHELL_ENTER__\n'
+id 2>/dev/null || true
+tty 2>/dev/null || true
+prp_ssh_log "shell-wrapper exec /bin/sh -i"
+exec /bin/sh -i
