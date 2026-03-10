@@ -7,8 +7,10 @@ prp_ssh_log() {
   printf '%s\n' "$msg" > /dev/ttyS0 2>/dev/null || true
 }
 prp_ssh_log "shell-wrapper enter"
-printf '__PRP_SHELL_ENTER__\n'
-id 2>/dev/null || true
-tty 2>/dev/null || true
-prp_ssh_log "shell-wrapper exec /bin/sh -i"
-exec /bin/sh -i
+if [ "$#" -gt 0 ]; then
+  prp_ssh_log "shell-wrapper exec /bin/sh $*"
+  exec /bin/sh "$@"
+else
+  prp_ssh_log "shell-wrapper exec /bin/sh -i"
+  exec /bin/sh -i
+fi

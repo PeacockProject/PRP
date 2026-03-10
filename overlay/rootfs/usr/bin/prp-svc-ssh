@@ -14,6 +14,21 @@ prp_ssh_log() {
   printf '%s\n' "$msg" > /dev/ttyS0 2>/dev/null || true
 }
 
+prp_set_sysctl() {
+  local key="$1"
+  local value="$2"
+  local path="/proc/sys/${key//./\/}"
+  if [ -w "$path" ]; then
+    printf '%s\n' "$value" > "$path" 2>/dev/null || return 1
+    return 0
+  fi
+  if command -v sysctl >/dev/null 2>&1; then
+    sysctl -w "$key=$value" >/dev/null 2>&1 || return 1
+    return 0
+  fi
+  return 1
+}
+
 prp_ssh_log "svc start port=$PORT blank=$ALLOW_BLANK"
 
 mkdir -p /etc "$KEYDIR" /root/.ssh /var/run
@@ -31,8 +46,7 @@ else
 fi
 
 # Keep this standalone even when called from the GUI button directly.
-# Force plain /bin/sh for now to isolate post-auth hangs from prp-login-sh.
-shell_path="/usr/bin/prp-shell-wrapper"
+shell_path="/usr/bin/prp-login-sh"
 if [ "$ALLOW_BLANK" = "1" ]; then
   printf 'root::0:0:root:/root:%s\n' "$shell_path" > /etc/passwd
 else
@@ -45,9 +59,9 @@ prp_ssh_log "passwd shell=$shell_path"
 
 # Dropbear checks shell validity against /etc/shells.
 {
+  echo /usr/bin/prp-login-sh
   echo /bin/sh
   echo /bin/ash
-  echo "$shell_path"
 } > /etc/shells
 prp_ssh_log "shells ready"
 
@@ -82,6 +96,12 @@ if [ ! -s "$HOSTKEY" ]; then
   exit 1
 fi
 prp_ssh_log "hostkey ready"
+
+if prp_set_sysctl net.ipv4.tcp_autocorking 0; then
+  prp_ssh_log "sysctl tcp_autocorking=0"
+else
+  prp_ssh_log "sysctl tcp_autocorking failed"
+fi
 
 killall dropbear >/dev/null 2>&1 || true
 args="-p $PORT -r $HOSTKEY"

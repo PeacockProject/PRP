@@ -312,12 +312,110 @@ That combination currently yields a working SSH shell.
 ### UART helper
 - `experiments/tail_prp_uart.py`
 
+## Incremental Reduction Results
+
+### Packet.c instrumentation removal
+
+Removed all 5 packet.c patches → **BROKEN**.
+Added back helpers + encrypt_packet only (no write_packet logging) → **BROKEN**.
+Restored full write_packet instrumentation → **WORKS** again.
+
+Replaced write_packet hexdump with `usleep(2000)` (2ms) → **BROKEN**.
+Changed to `usleep(50000)` (50ms) → **WORKS**.
+Changed to `usleep(10000)` (10ms) → **BROKEN**.
+
+Confirmed: the bug is a timing race, not a semantic issue. ~50ms before writev is required.
+
+### TCP_NODELAY patch
+
+Added `set_sock_nodelay(childsock)` to `svr-main.c` after `accept()`.
+Removed the usleep. Result: **BROKEN**.
+
+TCP_NODELAY alone is insufficient. It is kept as correct practice but does not fix the hang.
+
+### Kernel-level investigation (u_ether, MTK QMU)
+
+Investigated the u_ether `multi_pkt_xfer` TX aggregation path:
+- `goto success` path buffers small packets without USB submission when `no_tx_req_used > TX_REQ_THRESHOLD (= 1)`
+- Flush occurs via `tx_complete` when a prior request completes
+- `req->no_interrupt` field is **ignored** by the MTK MUSB QMU driver — it always sets IOC=1 in every GPD
+- `musb_g_giveback` properly releases `musb->lock` before calling the completion, so `tx_complete → usb_ep_queue → musb_gadget_queue` does not deadlock
+- `qmu_done_tx` always calls `musb_g_giveback` for all completed GPDs
+
+Analysis shows the aggregation path should self-flush via `tx_complete` within microseconds. The CHANNEL_SUCCESS pty-req and CHANNEL_SUCCESS shell packets are sent in separate select() iterations (~1-5ms apart), and CHANNEL_DATA arrives ~5-30ms after CHANNEL_SUCCESS shell (shell startup time). By any of these points, `no_tx_req_used` should be 0 and aggregation buffering should not occur.
+
+**Root cause not fully identified.** The timing threshold of ~40-50ms points toward:
+- TCP delayed-ACK cycle on the host (Linux default: 40ms)
+- Some SoC-level bus or cache ordering effect on the ARM MT6765
+- An interaction between the non-blocking socket write path and the RNDIS gadget TX queue state
+
+## Current Safe Working Choice
+
+For A16, the practical stable choice right now is:
+- `DROPBEAR_CC_MODE="muslcc"`
+- `DROPBEAR_PATCH_MODE="instrumented"`
+- `DROPBEAR_OPT_LEVEL="0"`
+
+With patches in `build-dropbear.sh`:
+- `set_sock_nodelay(childsock)` in `svr-main.c` after accept (kept, correct practice)
+- `usleep(50000)` before `writev()` in `write_packet()` in `packet.c` (workaround)
+- encrypt_packet / channel / session tracing (diagnostic, kept for now)
+
+## Kernel Patch (u_ether.c TX aggregation deferral)
+
+File: `experiments/android_kernel_oppo_mt6765/drivers/usb/gadget/function/u_ether.c`
+(hardlinked to `experiments/twrp/kernel/oppo/mt6765/drivers/usb/gadget/function/u_ether.c`)
+
+Removed the inner `if (dev->no_tx_req_used > TX_REQ_THRESHOLD)` block in
+`eth_start_xmit` (was lines 874-878) that deferred packets via `goto success`.
+
+### What the removed block did
+
+When `multi_pkt_xfer` is active and there are ≥ 2 TX requests in-flight
+(`no_tx_req_used > TX_REQ_THRESHOLD`, where `TX_REQ_THRESHOLD = 1`), small
+packets within the size/count limits were placed back into the `tx_reqs`
+freelist HEAD **without calling `usb_ep_queue()`**. They were only submitted
+later when `tx_complete` ran for a prior request.
+
+### Why this is the likely root cause
+
+SSH `CHANNEL_DATA` from Dropbear arrives ~5-30ms after `CHANNEL_SUCCESS shell`.
+At that point both `CHANNEL_SUCCESS pty-req` and `CHANNEL_SUCCESS shell` may
+still be in-flight at the USB hardware level, so `no_tx_req_used = 2 > 1`.
+The `CHANNEL_DATA` packet (a small SSH payload) would be deferred. `tx_complete`
+fires only when a prior request completes, but the host's TCP stack has already
+ACKed those packets and the host TCP stack uses a 40ms delayed-ACK timer for
+the SSH data itself. Result: `CHANNEL_DATA` is stuck for ~40ms, matching the
+observed threshold exactly.
+
+### Patch effect
+
+Every packet now goes directly to `usb_ep_queue()` regardless of
+`no_tx_req_used`. The `success:` label was also removed (it became dead code).
+
+### How to rebuild and test
+
+1. Rebuild the TWRP kernel:
+   ```
+   cd experiments/twrp
+   source build/envsetup.sh
+   lunch twrp_a16-eng
+   mka bootimage
+   ```
+   Kernel lands at `out/target/product/a16/kernel`.
+
+2. The PRP config already points to that path:
+   `KERNEL_IMAGE="$PRP_ROOT/../experiments/twrp/out/target/product/a16/kernel"`
+
+3. Build PRP as normal, flash with mtkclient, test SSH.
+
+4. If SSH works without `usleep(50000)` in Dropbear, the kernel patch is
+   confirmed as the fix. Remove the usleep workaround from `build-dropbear.sh`.
+
 ## Good Next Steps
 
-1. Keep the current working musl GCC instrumented state as the baseline.
-2. Reduce instrumentation carefully to find the smallest stabilizing delta.
-3. Avoid changing multiple variables at once.
-4. If the goal is root cause rather than just a working image, compare:
-   - musl GCC instrumented working build
-   - musl GCC vanilla failing build
-5. Do not spend more time on kernel/RNDIS theory unless new evidence appears. That split is already done.
+1. Rebuild the TWRP kernel with the u_ether.c patch above.
+2. Build PRP with the patched kernel, test SSH with and without the usleep workaround.
+3. If SSH works without usleep, strip the timing workaround from build-dropbear.sh.
+4. If SSH still fails with the kernel patch alone, fall back to: build the **broken** config (TCP_NODELAY, no usleep, no kernel patch), capture UART + `ssh -vvv`, confirm whether CHANNEL_DATA is logged before writev hang.
+5. Once root cause is confirmed, strip unnecessary instrumentation from build-dropbear.sh.
