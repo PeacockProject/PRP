@@ -53,7 +53,7 @@ static bool g_touch_attached = false;
 static uint64_t g_touch_retry_due_ms = 0;
 
 static const char *const k_cmd_reboot =
-    "echo rebooting...; /sbin/busybox sync; /sbin/busybox reboot -f || /sbin/busybox reboot || echo reboot_failed";
+    "/usr/bin/prp-phoenix-clear 2>/dev/null; echo rebooting...; /sbin/busybox sync; /sbin/busybox reboot -f || /sbin/busybox reboot || echo reboot_failed";
 static const char *const k_cmd_poweroff =
     "echo powering off...; /sbin/busybox sync; /sbin/busybox poweroff -f || /sbin/busybox poweroff || echo poweroff_failed";
 static const char *const k_cmd_mount_subparts = "/usr/bin/prp-mount-peacock-subparts";

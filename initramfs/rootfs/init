@@ -1803,6 +1803,14 @@ mount_subparts() {
   return 1
 }
 
+# Canonical subpartition mount implementation is shared with the button helper.
+# Keep in-file functions as fallback if the shared file is missing.
+if [ -r /usr/lib/prp/subparts-mount.sh ]; then
+  . /usr/lib/prp/subparts-mount.sh
+else
+  log "subparts mount library missing: /usr/lib/prp/subparts-mount.sh"
+fi
+
 start_subparts_mount() {
   [ "$DO_MOUNT_SUBPARTS" = "1" ] || return 0
   if [ "$SUBPARTS_ASYNC" = "1" ]; then
