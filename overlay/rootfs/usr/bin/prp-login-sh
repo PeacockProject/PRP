@@ -2,11 +2,23 @@
 set -eu
 export LD_LIBRARY_PATH="/sbin:/lib:/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
+prp_ssh_log() {
+  local msg="[prp-ssh] $*"
+  printf '%s\n' "$msg" > /dev/kmsg 2>/dev/null || true
+  printf '%s\n' "$msg" > /dev/console 2>/dev/null || true
+  printf '%s\n' "$msg" > /dev/ttyS0 2>/dev/null || true
+}
+
+prp_ssh_log "login-sh enter argv=$* tty=$(tty 2>/dev/null || echo none) pwd=$(pwd 2>/dev/null || echo /)"
+
 if [ -t 0 ] && [ -t 1 ] && [ "${PRP_LOGIN_BANNER_SHOWN:-0}" != "1" ]; then
   export PRP_LOGIN_BANNER_SHOWN=1
   if [ -x /usr/bin/prp-login-banner ]; then
+    prp_ssh_log "login banner start"
     /usr/bin/prp-login-banner || true
+    prp_ssh_log "login banner done"
   fi
 fi
 
+prp_ssh_log "exec /bin/sh"
 exec /bin/sh "$@"

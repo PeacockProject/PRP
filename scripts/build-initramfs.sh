@@ -56,11 +56,13 @@ sed -i "s/@PRP_SUBPARTS_DELAY_SECS@/${SUBPARTS_DELAY_SECS:-0}/g" "$INIT_SCRIPT"
 sed -i "s/@PRP_MOUNT_PRP_ROOTFS@/${MOUNT_PRP_ROOTFS}/g" "$INIT_SCRIPT"
 sed -i "s#@PRP_ROOTFS_DEV_HINT@#${ROOTFS_DEV_HINT}#g" "$INIT_SCRIPT"
 sed -i "s#@PRP_USERDATA_DEV_HINT@#${USERDATA_DEV_HINT:-}#g" "$INIT_SCRIPT"
+sed -i "s/@PRP_MONOLITHIC_INITRAMFS@/${PRP_MONOLITHIC_INITRAMFS}/g" "$INIT_SCRIPT"
 sed -i "s/@PRP_ENABLE_FB_IO@/${ENABLE_FB_IO}/g" "$INIT_SCRIPT"
 sed -i "s/@PRP_USE_FB_REFRESHER@/${USE_FB_REFRESHER}/g" "$INIT_SCRIPT"
 sed -i "s/@PRP_DEBUG_BOOT@/${DEBUG_BOOT}/g" "$INIT_SCRIPT"
 sed -i "s/@PRP_START_TTY_SHELLS@/${START_TTY_SHELLS}/g" "$INIT_SCRIPT"
 sed -i "s/@PRP_TEXT_CONSOLE_LOG@/${TEXT_CONSOLE_LOG}/g" "$INIT_SCRIPT"
+sed -i "s/@PRP_START_SSH@/${START_SSH:-1}/g" "$INIT_SCRIPT"
 sed -i "s/@PRP_SMOKE_ONLY@/${SMOKE_ONLY}/g" "$INIT_SCRIPT"
 
 # Enforce a unique PRP ramdisk by default.
@@ -192,6 +194,15 @@ if [[ -d "$ROOTFS_RUNTIME_DIR" ]] && find "$ROOTFS_RUNTIME_DIR" -mindepth 1 -max
     "$STAGE_DIR/usr/lib/libreadline.so"* \
     "$STAGE_DIR/usr/lib/libncursesw.so"* \
     "$STAGE_DIR/usr/lib/libtinfo.so"* 2>/dev/null || true
+fi
+
+if [[ "${PRP_MONOLITHIC_INITRAMFS:-0}" == "1" ]]; then
+  PRP_OVERLAY_STAGE_ONLY=1 "$SCRIPT_DIR/build-overlay.sh" "$CFG" "$OUT_DIR"
+  if [[ -d "$OUT_DIR/overlay-stage" ]]; then
+    cp -a "$OUT_DIR/overlay-stage"/. "$STAGE_DIR"/
+  else
+    die "monolithic initramfs requested but overlay stage is missing"
+  fi
 fi
 
 # If rootfs runtime doesn't provide peacock-splash, copy a known-working binary

@@ -3,7 +3,7 @@
 export PATH=/sbin:/bin:/usr/sbin:/usr/bin
 export LD_LIBRARY_PATH=/sbin:/lib:/usr/lib
 BB=/sbin/busybox
-PRP_OVERLAY_MOUNTED=0
+PRP_RUNTIME_READY=0
 GUI_ACTIVE=0
 # When set to 0, never write log lines to the framebuffer (peacock-splash).
 # This is used to prevent fighting the GUI once it starts.
@@ -43,6 +43,11 @@ MOUNT_PRP_ROOTFS="@PRP_MOUNT_PRP_ROOTFS@"
 case "$MOUNT_PRP_ROOTFS" in
   0|1) ;;
   *) MOUNT_PRP_ROOTFS=1 ;;
+esac
+PRP_MONOLITHIC_INITRAMFS="@PRP_MONOLITHIC_INITRAMFS@"
+case "$PRP_MONOLITHIC_INITRAMFS" in
+  0|1) ;;
+  *) PRP_MONOLITHIC_INITRAMFS=0 ;;
 esac
 ROOTFS_DEV_HINT="@PRP_ROOTFS_DEV_HINT@"
 case "$ROOTFS_DEV_HINT" in
@@ -84,7 +89,11 @@ START_DHCPD=1
 RNDIS_ADDR="172.16.42.1/24"
 RNDIS_DHCP_START="172.16.42.20"
 RNDIS_DHCP_END="172.16.42.120"
-START_SSH=1
+START_SSH="@PRP_START_SSH@"
+case "$START_SSH" in
+  0|1) ;;
+  *) START_SSH=1 ;;
+esac
 SSH_PORT=22
 SSH_ALLOW_BLANK_PASSWORD=1
 SHELL_PORT=2323
@@ -647,7 +656,7 @@ mount_prp_rootfs_overlay() {
     log "prp_rootfs mount failed dev=$dev tries=$mtry err=$merr"
     return 0
   fi
-  PRP_OVERLAY_MOUNTED=1
+  PRP_RUNTIME_READY=1
 
   # Overlay large directories via bind mounts if present.
   # Keep core initramfs (/sbin Android bionic bits, /init logic) untouched.
@@ -687,15 +696,24 @@ mount_prp_rootfs_overlay() {
   fi
 }
 
+setup_monolithic_runtime() {
+  mkdir -p /mnt
+  rm -rf /mnt/prp_rootfs 2>/dev/null || true
+  ln -snf / /mnt/prp_rootfs
+  PRP_RUNTIME_READY=1
+  log "monolithic runtime enabled"
+}
+
 start_overlay_gui() {
-  # GUI lives on PRP_ROOTFS overlay (bind-mounted at /usr).
-  [ "$PRP_OVERLAY_MOUNTED" = "1" ] || { vlog "gui skipped (no overlay)"; return 0; }
+  # GUI lives in the prepared PRP runtime, either from initramfs or a mounted rootfs.
+  [ "$PRP_RUNTIME_READY" = "1" ] || { vlog "gui skipped (runtime not ready)"; return 0; }
   detect_fb_dev || true
   if [ -x /usr/bin/prp-gui ] && [ -n "${FB_DEV:-}" ]; then
-    # Prefer a persistent config from PRP_ROOTFS if present.
-    local cfg="/mnt/prp_rootfs/etc/prp-gui.conf"
+    local cfg="/etc/prp-gui.conf"
     if [ -f "$cfg" ]; then
       /usr/bin/prp-gui --config "$cfg" >/tmp/prp-gui.log 2>&1 &
+    elif [ -f /mnt/prp_rootfs/etc/prp-gui.conf ]; then
+      /usr/bin/prp-gui --config /mnt/prp_rootfs/etc/prp-gui.conf >/tmp/prp-gui.log 2>&1 &
     else
       /usr/bin/prp-gui >/tmp/prp-gui.log 2>&1 &
     fi
@@ -784,17 +802,19 @@ fi
 # Overlay mount must happen early, before USB networking setup, so GUI/sshd/tools are ready.
 if [ "$DEBUG_BOOT" != "1" ]; then
   log "cfg debug=$DEBUG_BOOT mount_rootfs=$MOUNT_PRP_ROOTFS tty_shells=$START_TTY_SHELLS text_log=$TEXT_CONSOLE_LOG"
-  pmsg_mark "stage=before-overlay"
-  if [ "$MOUNT_PRP_ROOTFS" = "1" ]; then
+  pmsg_mark "stage=before-runtime"
+  if [ "$PRP_MONOLITHIC_INITRAMFS" = "1" ]; then
+    setup_monolithic_runtime
+  elif [ "$MOUNT_PRP_ROOTFS" = "1" ]; then
     mount_prp_rootfs_overlay
   else
-    log "prp_rootfs overlay disabled by config"
+    log "prp runtime mount disabled by config"
   fi
-  debug_snapshot "after-overlay"
-  pmsg_mark "stage=after-overlay"
+  debug_snapshot "after-runtime"
+  pmsg_mark "stage=after-runtime"
 else
-  pmsg_mark "stage=debug-skip-overlay"
-  log "debug boot: overlay/gui disabled"
+  pmsg_mark "stage=debug-skip-runtime"
+  log "debug boot: runtime/gui disabled"
 fi
 
 ensure_minimal_users() {
@@ -823,9 +843,9 @@ EOF
 
 start_dropbear() {
   [ "$START_SSH" = "1" ] || return 0
-  # sshd lives in PRP_ROOTFS overlay (/usr is bind-mounted) when present.
+  # sshd lives in the prepared PRP runtime (/usr is available after setup).
   local svc="/usr/bin/prp-svc-ssh"
-  [ "$PRP_OVERLAY_MOUNTED" = "1" ] || { vlog "ssh skipped (no overlay)"; return 0; }
+  [ "$PRP_RUNTIME_READY" = "1" ] || { vlog "ssh skipped (runtime not ready)"; return 0; }
   [ -x "$svc" ] || { log "ssh missing /usr/bin/prp-svc-ssh"; return 0; }
   ensure_minimal_users
   if [ -x /usr/sbin/dropbear ]; then
@@ -855,7 +875,7 @@ if [ "$DEBUG_BOOT" != "1" ]; then
   start_dropbear
   start_overlay_gui
 else
-  log "debug boot: ssh skipped (overlay disabled)"
+  log "debug boot: ssh skipped (runtime disabled)"
 fi
 vlog "initramfs booted"
 log "build $BUILD_TAG"
@@ -1782,6 +1802,14 @@ mount_subparts() {
   log "subpartition mount failed (see $logf)"
   return 1
 }
+
+# Canonical subpartition mount implementation is shared with the button helper.
+# Keep in-file functions as fallback if the shared file is missing.
+if [ -r /usr/lib/prp/subparts-mount.sh ]; then
+  . /usr/lib/prp/subparts-mount.sh
+else
+  log "subparts mount library missing: /usr/lib/prp/subparts-mount.sh"
+fi
 
 start_subparts_mount() {
   [ "$DO_MOUNT_SUBPARTS" = "1" ] || return 0

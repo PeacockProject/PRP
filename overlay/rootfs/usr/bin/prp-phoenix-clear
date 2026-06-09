@@ -1,0 +1,82 @@
+#!/bin/sh
+set -eu
+
+BB=/sbin/busybox
+
+log() {
+    echo "[prp-phx] $*" > /dev/console 2>/dev/null || true
+}
+
+find_part_by_name() {
+    for name in "$@"; do
+        if [ -b "/dev/block/by-name/$name" ]; then
+            echo "/dev/block/by-name/$name"
+            return 0
+        fi
+    done
+
+    for name in "$@"; do
+        for uevent in /sys/class/block/mmcblk0p*/uevent /sys/class/block/sd*/uevent /sys/class/block/sda*/uevent; do
+            [ -f "$uevent" ] || continue
+            partname=$($BB sed -n 's/^PARTNAME=//p' "$uevent" 2>/dev/null | $BB head -n1)
+            [ "$partname" = "$name" ] || continue
+            dev=$($BB basename "$($BB dirname "$uevent")")
+            echo "/dev/$dev"
+            return 0
+        done
+    done
+
+    return 1
+}
+
+clear_phoenix_reserve() {
+    local part="" off_hex=0x440008 off_dec=0
+
+    if [ -e /proc/devinfo/ufs ]; then
+        off_hex=0x456008
+    fi
+
+    part=$(find_part_by_name oplusreserve1 opporeserve1 || true)
+    if [ -z "$part" ]; then
+        log "phoenix reserve partition not found"
+        return 0
+    fi
+
+    off_dec=$((off_hex))
+    log "clearing phoenix reserve path=$part off=$(printf '0x%x' "$off_dec") len=8"
+    $BB dd if=/dev/zero of="$part" bs=1 seek="$off_dec" count=8 conv=notrunc 2>/dev/null || {
+        log "phoenix dd clear failed"
+        return 1
+    }
+    $BB sync
+
+    if [ -w /proc/phoenix ]; then
+        echo "SET_BOOTSTAGE@PHOENIX_BOOT_COMPLETED" > /proc/phoenix 2>/dev/null || true
+    fi
+    log "phoenix reserve clear done"
+}
+
+clear_bcb() {
+    local part=""
+
+    part=$(find_part_by_name para misc || true)
+    if [ -z "$part" ]; then
+        log "BCB partition not found"
+        return 0
+    fi
+
+    log "clearing BCB path=$part len=32"
+    $BB dd if=/dev/zero of="$part" bs=32 count=1 conv=notrunc 2>/dev/null || {
+        log "BCB dd clear failed"
+        return 1
+    }
+    $BB sync
+    log "BCB clear done"
+}
+
+main() {
+    clear_phoenix_reserve
+    clear_bcb
+}
+
+main "$@"

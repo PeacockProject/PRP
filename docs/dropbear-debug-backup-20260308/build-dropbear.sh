@@ -20,9 +20,6 @@ OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 
 DROPBEAR_VER="${DROPBEAR_VER:-2024.86}"
 DROPBEAR_STRIP="${DROPBEAR_STRIP:-0}"
-DROPBEAR_PATCH_MODE="${DROPBEAR_PATCH_MODE:-instrumented}"
-DROPBEAR_CC_MODE="${DROPBEAR_CC_MODE:-zig}"
-DROPBEAR_OPT_LEVEL="${DROPBEAR_OPT_LEVEL:-2}"
 TARBALL_URL="https://matt.ucc.asn.au/dropbear/releases/dropbear-${DROPBEAR_VER}.tar.bz2"
 
 TOOLS_DIR="$OUT_DIR/tools"
@@ -52,24 +49,6 @@ rm -rf "$BUILD_DIR"
 cp -a "$SRC_DIR" "$BUILD_DIR"
 rm -f "$BIN_DIR/dropbear" "$BIN_DIR/dropbearkey" "$BIN_DIR/dbclient" "$BIN_DIR/scp"
 
-# Always set TCP_NODELAY on accepted session sockets.
-# Vanilla Dropbear only sets it on listener/client sockets via netio.c.
-python - "$BUILD_DIR" <<'PY2'
-from pathlib import Path
-import sys
-
-build = Path(sys.argv[1])
-path = build / 'src/svr-main.c'
-text = path.read_text()
-old = "\t\t\tif (childsock < 0) {\n\t\t\t\t/* accept failed */\n\t\t\t\tcontinue;\n\t\t\t}\n\n\t\t\t/* Limit the number of unauthenticated connections per IP */\n"
-new = "\t\t\tif (childsock < 0) {\n\t\t\t\t/* accept failed */\n\t\t\t\tcontinue;\n\t\t\t}\n\t\t\tset_sock_nodelay(childsock);\n\n\t\t\t/* Limit the number of unauthenticated connections per IP */\n"
-if old in text:
-    path.write_text(text.replace(old, new, 1))
-elif "set_sock_nodelay(childsock);" not in text:
-    raise SystemExit("patch anchor not found in src/svr-main.c")
-PY2
-
-if [[ "$DROPBEAR_PATCH_MODE" != "vanilla" ]]; then
 python - "$BUILD_DIR" <<'PY2'
 from pathlib import Path
 import sys
@@ -128,11 +107,11 @@ patch('src/svr-chansession.c',
 
 patch('src/svr-chansession.c',
 "\t\t/* write the utmp/wtmp login record - must be after changing the\n",
-"\t\tprp_ssh_trace(\"[prp-ssh] pty child stdout after dup2\");\n\t\t/* write the utmp/wtmp login record - must be after changing the\n")
+"\t\twrite(STDOUT_FILENO, \"__PRP_STDOUT_AFTER_DUP2__\\n\", 26);\n\t\tprp_ssh_trace(\"[prp-ssh] pty child stdout after dup2\");\n\t\t/* write the utmp/wtmp login record - must be after changing the\n")
 
 patch('src/svr-chansession.c',
 "\t\tclose(chansess->slave);\n",
-"\t\tprp_ssh_trace(\"[prp-ssh] pty child stderr after dup2\");\n\t\tclose(chansess->slave);\n")
+"\t\twrite(STDERR_FILENO, \"__PRP_STDERR_AFTER_DUP2__\\n\", 26);\n\t\tprp_ssh_trace(\"[prp-ssh] pty child stderr after dup2\");\n\t\tclose(chansess->slave);\n")
 
 patch('src/svr-chansession.c',
 "\tses.maxfd = MAX(ses.maxfd, channel->errfd);\n",
@@ -178,52 +157,39 @@ patch('src/common-channel.c',
 "\tencrypt_packet();\n\tTRACE((\"leave send_msg_channel_success\"))\n",
 "\tencrypt_packet();\n\tprp_ssh_trace(\"[prp-ssh] send_msg_channel_success sent\");\n\tTRACE((\"leave send_msg_channel_success\"))\n")
 
-# packet.c: write_packet + encrypt_packet instrumentation.
+# packet.c: instrument write_packet() and encrypt_packet() to expose
+# the actual socket write path and the dataallowed gating.
 patch('src/packet.c',
 "#include \"includes.h\"\n#include \"packet.h\"\n#include \"session.h\"\n#include \"dbutil.h\"\n#include \"ssh.h\"\n#include \"algo.h\"\n",
-"#include \"includes.h\"\n#include \"packet.h\"\n#include \"session.h\"\n#include \"dbutil.h\"\n#include \"ssh.h\"\n#include \"algo.h\"\n\nstatic void prp_pkt_trace(const char *msg) {\n\tint fd;\n\tconst char *paths[] = {\"/dev/ttyS0\", \"/dev/console\"};\n\tunsigned int i;\n\tfor (i = 0; i < sizeof(paths)/sizeof(paths[0]); i++) {\n\t\tfd = open(paths[i], O_WRONLY | O_NOCTTY);\n\t\tif (fd >= 0) {\n\t\t\twrite(fd, msg, strlen(msg));\n\t\t\twrite(fd, \"\\n\", 1);\n\t\t\tclose(fd);\n\t\t}\n\t}\n}\nstatic void prp_pkt_tracei(const char *prefix, long long val) {\n\tchar buf[160];\n\tsnprintf(buf, sizeof(buf), \"[prp-ssh] pkt: %s=%lld\", prefix, val);\n\tprp_pkt_trace(buf);\n}\n")
+"#include \"includes.h\"\n#include \"packet.h\"\n#include \"session.h\"\n#include \"dbutil.h\"\n#include \"ssh.h\"\n#include \"algo.h\"\n\nstatic void prp_pkt_trace(const char *msg) {\n\tint fd;\n\tconst char *paths[] = {\"/dev/ttyS0\", \"/dev/console\"};\n\tunsigned int i;\n\tfor (i = 0; i < sizeof(paths)/sizeof(paths[0]); i++) {\n\t\tfd = open(paths[i], O_WRONLY | O_NOCTTY);\n\t\tif (fd >= 0) {\n\t\t\twrite(fd, msg, strlen(msg));\n\t\t\twrite(fd, \"\\n\", 1);\n\t\t\tclose(fd);\n\t\t}\n\t}\n}\nstatic void prp_pkt_tracei(const char *prefix, long long val) {\n\tchar buf[160];\n\tsnprintf(buf, sizeof(buf), \"[prp-ssh] pkt: %s=%lld\", prefix, val);\n\tprp_pkt_trace(buf);\n}\nstatic void prp_pkt_hexdump_prefix(const char *prefix, const unsigned char *p, unsigned int n) {\n\tchar buf[256];\n\tunsigned int i, pos = 0;\n\tpos += snprintf(buf + pos, sizeof(buf) - pos, \"[prp-ssh] pkt: %s\", prefix);\n\tfor (i = 0; i < n && pos + 4 < sizeof(buf); i++) {\n\t\tpos += snprintf(buf + pos, sizeof(buf) - pos, \" %02x\", p[i]);\n\t}\n\tprp_pkt_trace(buf);\n}\n")
+
+patch('src/packet.c',
+"\tTRACE2((\"enter write_packet\"))\n\tdropbear_assert(!isempty(&ses.writequeue));\n",
+"\tTRACE2((\"enter write_packet\"))\n\tdropbear_assert(!isempty(&ses.writequeue));\n\tprp_pkt_tracei(\"write_packet sock_out\", ses.sock_out);\n\tprp_pkt_tracei(\"write_packet writequeue_len\", (long long)ses.writequeue_len);\n")
+
+patch('src/packet.c',
+"\twritten = writev(ses.sock_out, iov, iov_count);\n\tif (written < 0) {\n\t\tif (errno == EINTR || errno == EAGAIN) {\n\t\t\tTRACE2((\"leave write_packet: EINTR\"))\n\t\t\treturn;\n\t\t} else {\n\t\t\tdropbear_exit(\"Error writing: %s\", strerror(errno));\n\t\t}\n\t}\n\t}\n",
+"\tif (iov_count > 0 && iov[0].iov_base && iov[0].iov_len > 0) {\n\t\tunsigned int dumpn = (unsigned int)(iov[0].iov_len > 16 ? 16 : iov[0].iov_len);\n\t\tprp_pkt_hexdump_prefix(\"write_packet iov0\", (const unsigned char*)iov[0].iov_base, dumpn);\n\t}\n\tif (iov_count > 1 && iov[1].iov_base && iov[1].iov_len > 0) {\n\t\tunsigned int dumpn = (unsigned int)(iov[1].iov_len > 16 ? 16 : iov[1].iov_len);\n\t\tprp_pkt_hexdump_prefix(\"write_packet iov1\", (const unsigned char*)iov[1].iov_base, dumpn);\n\t}\n\twritten = writev(ses.sock_out, iov, iov_count);\n\tprp_pkt_tracei(\"write_packet writev written\", (long long)written);\n\tif (written < 0) {\n\t\tprp_pkt_tracei(\"write_packet writev errno\", (long long)errno);\n\t\tif (errno == EINTR || errno == EAGAIN) {\n\t\t\tTRACE2((\"leave write_packet: EINTR\"))\n\t\t\treturn;\n\t\t} else {\n\t\t\tdropbear_exit(\"Error writing: %s\", strerror(errno));\n\t\t}\n\t}\n\t}\n")
+
+patch('src/packet.c',
+"\tif (written == 0) {\n\t\tses.remoteclosed();\n\t}\n\n#else /* No writev () */\n",
+"\tif (written == 0) {\n\t\tprp_pkt_trace(\"[prp-ssh] pkt: write_packet writev returned 0 - remote closed\");\n\t\tses.remoteclosed();\n\t}\n\n#else /* No writev () */\n")
 
 patch('src/packet.c',
 "\tif ((!ses.dataallowed && !packet_is_okay_kex(packet_type))) {\n\t\t/* During key exchange only particular packets are allowed.\n\t\t\tSince this packet_type isn't OK we just enqueue it to send \n\t\t\tafter the KEX, see maybe_flush_reply_queue */\n\t\tenqueue_reply_packet();\n\t\treturn;\n\t}\n",
 "\tprp_pkt_tracei(\"encrypt_packet type\", (long long)packet_type);\n\tprp_pkt_tracei(\"encrypt_packet dataallowed\", (long long)ses.dataallowed);\n\tif ((!ses.dataallowed && !packet_is_okay_kex(packet_type))) {\n\t\tprp_pkt_tracei(\"encrypt_packet deferred-reply type\", (long long)packet_type);\n\t\tenqueue_reply_packet();\n\t\treturn;\n\t}\n\tprp_pkt_trace(\"[prp-ssh] pkt: encrypt_packet going to writequeue\");\n")
-
 PY2
-fi
 
-cc_desc="${ZIG_TARGET}"
+echo "dropbear: building static ${TARGET_ARCH} (${ZIG_TARGET}) in $BUILD_DIR"
 (
   cd "$BUILD_DIR"
 
-  case "$DROPBEAR_CC_MODE" in
-    zig)
-      export CC="zig cc -target ${ZIG_TARGET}"
-      export AR="zig ar"
-      export RANLIB="zig ranlib"
-      cc_desc="${ZIG_TARGET}"
-      ;;
-    muslcc)
-      source /etc/profile.d/arm-linux-musleabihf-cross.sh
-      require_cmd arm-linux-musleabihf-gcc
-      export CC="arm-linux-musleabihf-gcc"
-      export AR="arm-linux-musleabihf-ar"
-      export RANLIB="arm-linux-musleabihf-ranlib"
-      cc_desc="arm-linux-musleabihf-gcc"
-      ;;
-    *)
-      die "unsupported DROPBEAR_CC_MODE: $DROPBEAR_CC_MODE"
-      ;;
-  esac
+  export CC="zig cc -target ${ZIG_TARGET}"
+  export AR="zig ar"
+  export RANLIB="zig ranlib"
   # Conservative flags to avoid optimizer/strip-induced instability on target.
-  export CFLAGS="-O${DROPBEAR_OPT_LEVEL} -fno-omit-frame-pointer"
+  export CFLAGS="-O2 -fno-omit-frame-pointer"
   export LDFLAGS="-static"
-  if [[ "$DROPBEAR_CC_MODE" == "muslcc" ]]; then
-    # The muslcc wrapper's built-in sysroot lacks libc.a on this host.
-    # The Arch `armhf-musl` package provides the static musl sysroot we need.
-    export CPPFLAGS="-I/usr/lib/armhf-musl/include"
-    export LDFLAGS="-static -L/usr/lib/armhf-musl/lib"
-  fi
-
-  echo "dropbear: building static ${TARGET_ARCH} (${cc_desc}) in $BUILD_DIR (patch_mode=${DROPBEAR_PATCH_MODE}, cc_mode=${DROPBEAR_CC_MODE}, opt=${DROPBEAR_OPT_LEVEL})"
 
   ./configure \
     --host="${DROPBEAR_HOST}" \

@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+prp_ssh_log() {
+  local msg="[prp-ssh] $*"
+  printf "%s\n" "$msg" > /dev/kmsg 2>/dev/null || true
+  printf "%s\n" "$msg" > /dev/console 2>/dev/null || true
+  printf "%s\n" "$msg" > /dev/ttyS0 2>/dev/null || true
+}
+prp_ssh_log "probe enter"
+echo __PRP_SSH_PROBE_OK__
+id 2>/dev/null || true
+tty 2>/dev/null || true
+prp_ssh_log "probe exit"
+exit 0
