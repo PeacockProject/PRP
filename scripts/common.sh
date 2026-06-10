@@ -128,7 +128,7 @@ resolve_kernel_image() {
   local prp_candidates=(
     "$HOME/.local/var/peacock/build-chroot/*/build/${kernel_pkg}-[0-9]*/zImage-prp"
     "$HOME/.local/var/peacock/kernel-cache/${kernel_pkg}-[0-9]*.pkg.tar.gz/zImage-prp"
-    "$HOME/.local/var/peacock/peacock-cache/${kernel_pkg}-[0-9]*.pkg.tar.gz/zImage-prp"
+    "$HOME/.local/var/peacock/packages/*/${kernel_pkg}-[0-9]*.pkg.tar.gz/zImage-prp"
   )
   local prp_best=""
   local pp=""
@@ -156,8 +156,8 @@ resolve_kernel_image() {
     "$HOME/.local/var/peacock/build-chroot/*/build/${kernel_pkg}-[0-9]*/arch/*/boot/Image.gz"
     "$HOME/.local/var/peacock/kernel-cache/${kernel_pkg}-[0-9]*.pkg.tar.gz/zImage"
     "$HOME/.local/var/peacock/kernel-cache/${kernel_pkg}-[0-9]*.pkg.tar.gz/Image.gz"
-    "$HOME/.local/var/peacock/peacock-cache/${kernel_pkg}-[0-9]*.pkg.tar.gz/zImage"
-    "$HOME/.local/var/peacock/peacock-cache/${kernel_pkg}-[0-9]*.pkg.tar.gz/Image.gz"
+    "$HOME/.local/var/peacock/packages/*/${kernel_pkg}-[0-9]*.pkg.tar.gz/zImage"
+    "$HOME/.local/var/peacock/packages/*/${kernel_pkg}-[0-9]*.pkg.tar.gz/Image.gz"
   )
   if [[ "$kernel_pkg" == "$default_kernel_pkg" ]]; then
     candidates+=("$HOME/.local/var/peacock/boot-p1.img")
