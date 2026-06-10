@@ -121,6 +121,34 @@ resolve_kernel_image() {
     return 0
   fi
 
+  # Prefer a PRP-trimmed kernel (zImage-prp) when the kernel port built one
+  # (peacock-ports linux-<dev> declaring prp_kernel_config stages it beside
+  # the full zImage). Recovery images want the trimmed, no-modules kernel.
+  # Falls through to the full kernel below when no zImage-prp exists.
+  local prp_candidates=(
+    "$HOME/.local/var/peacock/build-chroot/*/build/${kernel_pkg}-[0-9]*/zImage-prp"
+    "$HOME/.local/var/peacock/kernel-cache/${kernel_pkg}-[0-9]*.pkg.tar.gz/zImage-prp"
+    "$HOME/.local/var/peacock/peacock-cache/${kernel_pkg}-[0-9]*.pkg.tar.gz/zImage-prp"
+  )
+  local prp_best=""
+  local pp=""
+  local pc
+  shopt -s nullglob
+  for pp in "${prp_candidates[@]}"; do
+    for pc in $pp; do
+      [[ -f "$pc" ]] || continue
+      _candidate_matches_kernel_pkg "$pc" "$kernel_pkg" || continue
+      if [[ -z "$prp_best" || "$pc" -nt "$prp_best" ]]; then
+        prp_best="$pc"
+      fi
+    done
+  done
+  shopt -u nullglob
+  if [[ -n "$prp_best" ]]; then
+    echo "$prp_best"
+    return 0
+  fi
+
   local candidates=(
     "$HOME/.local/var/peacock/build-chroot/*/build/${kernel_pkg}-[0-9]*/zImage"
     "$HOME/.local/var/peacock/build-chroot/*/build/${kernel_pkg}-[0-9]*/Image.gz"
