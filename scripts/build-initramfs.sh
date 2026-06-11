@@ -215,6 +215,14 @@ if [[ "${PRP_MONOLITHIC_INITRAMFS:-0}" == "1" ]]; then
   fi
 fi
 
+# Peacock ftr-installs the peacock-splash package into the build chroot;
+# prefer that binary (correct arch, built from the same source).
+if [[ ! -x "$STAGE_DIR/usr/bin/peacock-splash" ]] && [[ -x /usr/bin/peacock-splash ]]; then
+  mkdir -p "$STAGE_DIR/usr/bin"
+  cp -a /usr/bin/peacock-splash "$STAGE_DIR/usr/bin/peacock-splash"
+  chmod +x "$STAGE_DIR/usr/bin/peacock-splash"
+fi
+
 # If rootfs runtime doesn't provide peacock-splash, copy a known-working binary
 # from the current Peacock boot.img ramdisk.
 if [[ ! -x "$STAGE_DIR/usr/bin/peacock-splash" ]]; then
