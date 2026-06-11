@@ -81,16 +81,25 @@ fi
 BB_PATH="${BUSYBOX_STATIC/#\~/$HOME}"
 [[ -f "$BB_PATH" ]] || die "static busybox not found: $BB_PATH"
 
+# How to execute a busybox of a given arch: "native" when it matches the
+# current machine (run directly — e.g. inside an aarch64 chroot where
+# binfmt handles it), else a qemu-user wrapper, else "" (can't run it).
 busybox_qemu_for() {
   local bb="$1"
-  local f=""
+  local f="" machine=""
   f="$(file "$bb" 2>/dev/null || true)"
+  machine="$(uname -m 2>/dev/null || echo unknown)"
   case "$f" in
     *"ARM aarch64"*)
+      case "$machine" in aarch64 | arm64) echo native; return 0 ;; esac
       command -v qemu-aarch64 >/dev/null 2>&1 && { echo qemu-aarch64; return 0; }
       ;;
     *"ELF 32-bit LSB executable, ARM"*)
+      case "$machine" in armv7* | armv6* | arm) echo native; return 0 ;; esac
       command -v qemu-arm >/dev/null 2>&1 && { echo qemu-arm; return 0; }
+      ;;
+    *"x86-64"*)
+      [[ "$machine" == "x86_64" ]] && { echo native; return 0; }
       ;;
   esac
   echo ""
@@ -98,14 +107,15 @@ busybox_qemu_for() {
 
 busybox_smoke_ok() {
   local bb="$1"
-  local qemu=""
-  local out=""
-  qemu="$(busybox_qemu_for "$bb")"
-  [[ -n "$qemu" ]] || return 1
+  local mode="" out=""
+  mode="$(busybox_qemu_for "$bb")"
+  [[ -n "$mode" ]] || return 1
+  local -a run=()
+  [[ "$mode" != "native" ]] && run=("$mode")
 
-  out="$(printf 'a\nb\na\n' | "$qemu" "$bb" awk '!seen[$0]++' 2>/dev/null || true)"
+  out="$(printf 'a\nb\na\n' | "${run[@]}" "$bb" awk '!seen[$0]++' 2>/dev/null || true)"
   [[ "$out" == $'a\nb' ]] || return 1
-  printf 'x\n' | "$qemu" "$bb" grep -q x >/dev/null 2>&1 || return 1
+  printf 'x\n' | "${run[@]}" "$bb" grep -q x >/dev/null 2>&1 || return 1
   return 0
 }
 
