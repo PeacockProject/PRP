@@ -271,15 +271,18 @@ if [[ -x "$VENDOR_RUNTIME/sbin/fdisk" ]]; then
   shopt -u nullglob
 fi
 
-# GUI binary. Optional: if build fails, we still create an overlay image.
-if "$SCRIPT_DIR/build-gui.sh" "$CFG" "$OUT_DIR"; then
-  if [[ -f "$OUT_DIR/tools/gui-out/${TARGET_ARCH}/prp-gui" ]]; then
-    cp -a "$OUT_DIR/tools/gui-out/${TARGET_ARCH}/prp-gui" "$STAGE_DIR/usr/bin/prp-gui"
-    chmod +x "$STAGE_DIR/usr/bin/prp-gui"
-  fi
-else
-  echo "overlay: gui build failed; continuing without GUI" >&2
+# GUI binary — this IS the recovery UI. REQUIRED: an overlay without prp-gui is
+# useless for recovery, so fail loudly rather than silently shipping a GUI-less
+# rootfs. (Contrast dropbear above, where ssh is a genuine convenience.)
+if ! "$SCRIPT_DIR/build-gui.sh" "$CFG" "$OUT_DIR"; then
+  die "prp-gui build failed (see above) — refusing to ship a GUI-less overlay. \
+Common cause: no DNS in the build chroot (curl 'Could not resolve host') so the \
+LVGL source can't be fetched; ensure the chroot has a working /etc/resolv.conf."
 fi
+GUI_BIN="$OUT_DIR/tools/gui-out/${TARGET_ARCH}/prp-gui"
+[[ -f "$GUI_BIN" ]] || die "prp-gui build reported success but $GUI_BIN is missing"
+cp -a "$GUI_BIN" "$STAGE_DIR/usr/bin/prp-gui"
+chmod +x "$STAGE_DIR/usr/bin/prp-gui"
 
 # Best-effort: bake host public keys into overlay for key-based login.
 if [[ -d "$HOME/.ssh" ]]; then
