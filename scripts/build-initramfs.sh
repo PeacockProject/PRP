@@ -44,26 +44,11 @@ if [[ "$TARGET_ARCH" == "aarch64" ]]; then
   chmod +x "$STAGE_DIR/init"
 fi
 
-# Bake a build tag into /init so on-device logs can confirm the exact image.
+# Bake a build tag into /init so on-device logs can confirm the exact image, and
+# substitute the rest of the @PRP_*@ tokens. The token list is single-sourced in
+# common.sh (substitute_prp_init) so the overlay's recovery re-entry copy matches.
 build_tag="prp-$(date -u +%Y%m%d)-$(sha256sum "$ROOTFS_SRC/init" | awk '{print substr($1,1,8)}')"
-sed -i "s/@PRP_BUILD_TAG@/${build_tag}/g" "$INIT_SCRIPT"
-sed -i "s/@PRP_USB_SERIAL@/${USB_SERIAL}/g" "$INIT_SCRIPT"
-sed -i "s#@PRP_USB_GADGET_PATH@#${USB_GADGET_PATH}#g" "$INIT_SCRIPT"
-sed -i "s#@PRP_USB_UDC_NAME@#${USB_UDC_NAME}#g" "$INIT_SCRIPT"
-sed -i "s/@PRP_DO_MOUNT_SUBPARTS@/${DO_MOUNT_SUBPARTS}/g" "$INIT_SCRIPT"
-sed -i "s/@PRP_SUBPARTS_ASYNC@/${SUBPARTS_ASYNC:-0}/g" "$INIT_SCRIPT"
-sed -i "s/@PRP_SUBPARTS_DELAY_SECS@/${SUBPARTS_DELAY_SECS:-0}/g" "$INIT_SCRIPT"
-sed -i "s/@PRP_MOUNT_PRP_ROOTFS@/${MOUNT_PRP_ROOTFS}/g" "$INIT_SCRIPT"
-sed -i "s#@PRP_ROOTFS_DEV_HINT@#${ROOTFS_DEV_HINT}#g" "$INIT_SCRIPT"
-sed -i "s#@PRP_USERDATA_DEV_HINT@#${USERDATA_DEV_HINT:-}#g" "$INIT_SCRIPT"
-sed -i "s/@PRP_MONOLITHIC_INITRAMFS@/${PRP_MONOLITHIC_INITRAMFS}/g" "$INIT_SCRIPT"
-sed -i "s/@PRP_ENABLE_FB_IO@/${ENABLE_FB_IO}/g" "$INIT_SCRIPT"
-sed -i "s/@PRP_USE_FB_REFRESHER@/${USE_FB_REFRESHER}/g" "$INIT_SCRIPT"
-sed -i "s/@PRP_DEBUG_BOOT@/${DEBUG_BOOT}/g" "$INIT_SCRIPT"
-sed -i "s/@PRP_START_TTY_SHELLS@/${START_TTY_SHELLS}/g" "$INIT_SCRIPT"
-sed -i "s/@PRP_TEXT_CONSOLE_LOG@/${TEXT_CONSOLE_LOG}/g" "$INIT_SCRIPT"
-sed -i "s/@PRP_START_SSH@/${START_SSH:-1}/g" "$INIT_SCRIPT"
-sed -i "s/@PRP_SMOKE_ONLY@/${SMOKE_ONLY}/g" "$INIT_SCRIPT"
+substitute_prp_init "$INIT_SCRIPT" "$build_tag"
 
 # Enforce a unique PRP ramdisk by default.
 if [[ -n "${RAMDISK_PREBUILT:-}" ]]; then

@@ -96,6 +96,40 @@ load_config() {
   SMOKE_ONLY="${SMOKE_ONLY:-0}"
 }
 
+# Substitute the @PRP_*@ template tokens in a copy of /init. Single-sourced so
+# the initramfs build (native /init) and the overlay build (the recovery
+# re-entry copy installed as /usr/lib/prp/prp-init) can never drift apart.
+# Requires load_config to have run. Arg 2 (build tag) is optional; computed from
+# the pristine source /init when omitted.
+substitute_prp_init() {
+  local init_file="$1"
+  local build_tag="${2:-}"
+  if [[ -z "$build_tag" ]]; then
+    local src="$PRP_ROOT/${INITRAMFS_ROOTFS:-initramfs/rootfs}/init"
+    build_tag="prp-$(date -u +%Y%m%d)-$(sha256sum "$src" | awk '{print substr($1,1,8)}')"
+  fi
+  sed -i \
+    -e "s/@PRP_BUILD_TAG@/${build_tag}/g" \
+    -e "s/@PRP_USB_SERIAL@/${USB_SERIAL}/g" \
+    -e "s#@PRP_USB_GADGET_PATH@#${USB_GADGET_PATH}#g" \
+    -e "s#@PRP_USB_UDC_NAME@#${USB_UDC_NAME}#g" \
+    -e "s/@PRP_DO_MOUNT_SUBPARTS@/${DO_MOUNT_SUBPARTS}/g" \
+    -e "s/@PRP_SUBPARTS_ASYNC@/${SUBPARTS_ASYNC:-0}/g" \
+    -e "s/@PRP_SUBPARTS_DELAY_SECS@/${SUBPARTS_DELAY_SECS:-0}/g" \
+    -e "s/@PRP_MOUNT_PRP_ROOTFS@/${MOUNT_PRP_ROOTFS}/g" \
+    -e "s#@PRP_ROOTFS_DEV_HINT@#${ROOTFS_DEV_HINT}#g" \
+    -e "s#@PRP_USERDATA_DEV_HINT@#${USERDATA_DEV_HINT:-}#g" \
+    -e "s/@PRP_MONOLITHIC_INITRAMFS@/${PRP_MONOLITHIC_INITRAMFS}/g" \
+    -e "s/@PRP_ENABLE_FB_IO@/${ENABLE_FB_IO}/g" \
+    -e "s/@PRP_USE_FB_REFRESHER@/${USE_FB_REFRESHER}/g" \
+    -e "s/@PRP_DEBUG_BOOT@/${DEBUG_BOOT}/g" \
+    -e "s/@PRP_START_TTY_SHELLS@/${START_TTY_SHELLS}/g" \
+    -e "s/@PRP_TEXT_CONSOLE_LOG@/${TEXT_CONSOLE_LOG}/g" \
+    -e "s/@PRP_START_SSH@/${START_SSH:-1}/g" \
+    -e "s/@PRP_SMOKE_ONLY@/${SMOKE_ONLY}/g" \
+    "$init_file"
+}
+
 resolve_kernel_image() {
   local kernel_pkg="${KERNEL_PACKAGE:-linux-${TARGET_NAME}}"
   local default_kernel_pkg="linux-${TARGET_NAME}"

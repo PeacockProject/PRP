@@ -289,6 +289,27 @@ if [[ -d "$HOME/.ssh" ]]; then
   fi
 fi
 
+# PRP recovery re-entry, for the PeacockOS base (peacock-init).
+# When an active flavor fails to boot, peacock-init mounts this PRP_ROOTFS and
+# chroots into it, then runs /usr/bin/prp-recovery-enter. That re-execs PRP's
+# OWN init (this same script, installed as /usr/lib/prp/prp-init with the device
+# @PRP_*@ values baked in) with PRP_RECOVERY_SESSION=1, which skips the boot-only
+# steps and brings up the real recovery session (framebuffer/GUI/ssh/usb/tty) in
+# place — no reboot, no duplicated logic.
+mkdir -p "$STAGE_DIR/usr/lib/prp"
+cp -a "$PRP_ROOT/$INITRAMFS_ROOTFS/init" "$STAGE_DIR/usr/lib/prp/prp-init"
+substitute_prp_init "$STAGE_DIR/usr/lib/prp/prp-init"
+chmod +x "$STAGE_DIR/usr/lib/prp/prp-init"
+
+cat > "$STAGE_DIR/usr/bin/prp-recovery-enter" <<'EOF'
+#!/sbin/busybox sh
+# Recovery entry invoked by the PeacockOS base (peacock-init) after it mounts
+# PRP_ROOTFS and chroots in. Run PRP's real recovery session in place.
+export PRP_RECOVERY_SESSION=1
+exec /usr/lib/prp/prp-init "$@"
+EOF
+chmod +x "$STAGE_DIR/usr/bin/prp-recovery-enter"
+
 # Create ext4 image populated from a tarball so we can force numeric root ownership without sudo.
 if [[ "$PRP_OVERLAY_STAGE_ONLY" == "1" ]]; then
   echo "overlay-stage: $STAGE_DIR"

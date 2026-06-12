@@ -107,6 +107,15 @@ DEBUG_SNAP_SEQ=0
 PEACOCK_BOOT_MNT="/mnt/peacock_boot"
 PEACOCK_ROOT_MNT="/mnt/peacock_root"
 
+# Recovery re-entry. Set by prp-recovery-enter when the PeacockOS base
+# (peacock-init) has already mounted PRP_ROOTFS and chrooted into it, then runs
+# THIS SAME init to bring up the real recovery session in place. In this mode we
+# run the identical session flow (fb/gui/ssh/usb/tty) but skip every boot-only
+# step: pseudo-fs mounts, /dev hotplug, rootfs discovery/mount (the runtime is
+# already at /), userdata subparts, and the debug partition.
+PRP_RECOVERY_SESSION="${PRP_RECOVERY_SESSION:-0}"
+case "$PRP_RECOVERY_SESSION" in 0|1) ;; *) PRP_RECOVERY_SESSION=0 ;; esac
+
 detect_fb_dev() {
   # Resolve framebuffer node across Android-style and mainline-style paths.
   if [ -e /dev/fb0 ]; then
@@ -177,6 +186,9 @@ find_debug_dev() {
 }
 
 mount_debug_partition() {
+  # Recovery re-entry runs inside peacock-init's chroot; don't touch the on-disk
+  # debug/log partition. Disabling this also no-ops debug_snapshot()/log-to-disk.
+  [ "$PRP_RECOVERY_SESSION" = "1" ] && return 1
   local tries=0
   local fs=""
   [ "$DEBUG_READY" = "1" ] && return 0
@@ -456,9 +468,14 @@ silence_text_consoles() {
 }
 
 mkdir -p /proc /sys /dev /run /tmp /etc "$PEACOCK_BOOT_MNT" "$PEACOCK_ROOT_MNT" /mnt/prp_debug
-$BB mount -t proc proc /proc 2>/dev/null || true
-$BB mount -t sysfs sysfs /sys 2>/dev/null || true
-$BB mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
+# In recovery re-entry peacock-init already provides /proc /sys /dev; mounting
+# devtmpfs again would shadow the populated /dev it bound in. devpts is still
+# mounted (ssh ptys + tty), harmlessly stacking if already present.
+if [ "$PRP_RECOVERY_SESSION" != "1" ]; then
+  $BB mount -t proc proc /proc 2>/dev/null || true
+  $BB mount -t sysfs sysfs /sys 2>/dev/null || true
+  $BB mount -t devtmpfs devtmpfs /dev 2>/dev/null || true
+fi
 $BB mount -t devpts devpts /dev/pts 2>/dev/null || true
 [ -c /dev/console ] || $BB mknod /dev/console c 5 1 2>/dev/null || true
 pmsg_mark "stage=dev-mounted"
@@ -481,7 +498,7 @@ if [ "$DEBUG_BOOT" = "1" ]; then
   ROOTFS_VERBOSE=1
   pmsg_mark "stage=debug-boot-enabled"
 fi
-if [ -x /sbin/mdev ]; then
+if [ "$PRP_RECOVERY_SESSION" != "1" ] && [ -x /sbin/mdev ]; then
   echo /sbin/mdev > /proc/sys/kernel/hotplug 2>/dev/null || true
   /sbin/mdev -s >/dev/null 2>&1 || true
 fi
@@ -803,7 +820,10 @@ fi
 if [ "$DEBUG_BOOT" != "1" ]; then
   log "cfg debug=$DEBUG_BOOT mount_rootfs=$MOUNT_PRP_ROOTFS tty_shells=$START_TTY_SHELLS text_log=$TEXT_CONSOLE_LOG"
   pmsg_mark "stage=before-runtime"
-  if [ "$PRP_MONOLITHIC_INITRAMFS" = "1" ]; then
+  if [ "$PRP_RECOVERY_SESSION" = "1" ] || [ "$PRP_MONOLITHIC_INITRAMFS" = "1" ]; then
+    # Recovery re-entry: peacock-init already mounted PRP_ROOTFS and chrooted in,
+    # so the runtime IS /. setup_monolithic_runtime just points /mnt/prp_rootfs
+    # at / and marks the runtime ready (no rootfs discovery/mount needed).
     setup_monolithic_runtime
   elif [ "$MOUNT_PRP_ROOTFS" = "1" ]; then
     mount_prp_rootfs_overlay
@@ -1812,6 +1832,8 @@ else
 fi
 
 start_subparts_mount() {
+  # Recovery re-entry: don't mount userdata subpartitions from inside the chroot.
+  [ "$PRP_RECOVERY_SESSION" = "1" ] && return 0
   [ "$DO_MOUNT_SUBPARTS" = "1" ] || return 0
   if [ "$SUBPARTS_ASYNC" = "1" ]; then
     (
