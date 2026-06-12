@@ -59,7 +59,16 @@ from pathlib import Path
 import sys
 
 build = Path(sys.argv[1])
-path = build / 'src/svr-main.c'
+
+def resolve(rel):
+    # dropbear moved its sources into src/ in newer releases; 2022.83 keeps them
+    # at the tree root. Accept either so the patch finds the file regardless.
+    for cand in (build / rel, build / Path(rel).name):
+        if cand.exists():
+            return cand
+    raise SystemExit("source not found: " + rel)
+
+path = resolve('src/svr-main.c')
 text = path.read_text()
 old = "\t\t\tif (childsock < 0) {\n\t\t\t\t/* accept failed */\n\t\t\t\tcontinue;\n\t\t\t}\n\n\t\t\t/* Limit the number of unauthenticated connections per IP */\n"
 new = "\t\t\tif (childsock < 0) {\n\t\t\t\t/* accept failed */\n\t\t\t\tcontinue;\n\t\t\t}\n\t\t\tset_sock_nodelay(childsock);\n\n\t\t\t/* Limit the number of unauthenticated connections per IP */\n"
@@ -75,8 +84,15 @@ from pathlib import Path
 import sys
 build = Path(sys.argv[1])
 
+def resolve(rel):
+    # dropbear 2022.83 keeps sources at the tree root; newer releases use src/.
+    for cand in (build / rel, build / Path(rel).name):
+        if cand.exists():
+            return cand
+    raise SystemExit("source not found: " + rel)
+
 def patch(path_str, old, new):
-    path = build / path_str
+    path = resolve(path_str)
     text = path.read_text()
     if old not in text:
         raise SystemExit(f"patch anchor not found in {path_str}")
