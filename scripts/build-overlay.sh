@@ -209,7 +209,17 @@ VENDOR_RUNTIME="$PRP_ROOT/vendor/$TARGET_NAME/rootfs-runtime"
 # Prefer distro/runtime binaries synced from the target rootfs; fall back to
 # local static cross-build when unavailable.
 dropbear_ok=0
-if [[ -x "$VENDOR_RUNTIME/usr/sbin/dropbear" && -x "$VENDOR_RUNTIME/usr/sbin/dropbearkey" ]]; then
+# Prefer dropbear provided as a build_dep_package: the `dropbear` peacock port
+# builds a static-musl dropbear ONCE (cached as a feather) and ftr-installs it
+# into the build chroot at /usr/sbin/dropbear. Then a vendored runtime. Building
+# from source inline (build-dropbear.sh) is the last resort.
+if [[ -x /usr/sbin/dropbear && -x /usr/sbin/dropbearkey ]]; then
+  cp -a /usr/sbin/dropbear "$STAGE_DIR/usr/sbin/dropbear"
+  cp -a /usr/sbin/dropbearkey "$STAGE_DIR/usr/sbin/dropbearkey"
+  [[ -x /usr/bin/dbclient ]] && cp -a /usr/bin/dbclient "$STAGE_DIR/usr/bin/dbclient"
+  [[ -x /usr/bin/scp ]] && cp -a /usr/bin/scp "$STAGE_DIR/usr/bin/scp"
+  dropbear_ok=1
+elif [[ -x "$VENDOR_RUNTIME/usr/sbin/dropbear" && -x "$VENDOR_RUNTIME/usr/sbin/dropbearkey" ]]; then
   cp -a "$VENDOR_RUNTIME/usr/sbin/dropbear" "$STAGE_DIR/usr/sbin/dropbear"
   cp -a "$VENDOR_RUNTIME/usr/sbin/dropbearkey" "$STAGE_DIR/usr/sbin/dropbearkey"
   [[ -x "$VENDOR_RUNTIME/usr/bin/dbclient" ]] && cp -a "$VENDOR_RUNTIME/usr/bin/dbclient" "$STAGE_DIR/usr/bin/dbclient"
