@@ -208,20 +208,29 @@ VENDOR_RUNTIME="$PRP_ROOT/vendor/$TARGET_NAME/rootfs-runtime"
 # SSH server + ssh/scp client bits.
 # Prefer distro/runtime binaries synced from the target rootfs; fall back to
 # local static cross-build when unavailable.
+dropbear_ok=0
 if [[ -x "$VENDOR_RUNTIME/usr/sbin/dropbear" && -x "$VENDOR_RUNTIME/usr/sbin/dropbearkey" ]]; then
   cp -a "$VENDOR_RUNTIME/usr/sbin/dropbear" "$STAGE_DIR/usr/sbin/dropbear"
   cp -a "$VENDOR_RUNTIME/usr/sbin/dropbearkey" "$STAGE_DIR/usr/sbin/dropbearkey"
   [[ -x "$VENDOR_RUNTIME/usr/bin/dbclient" ]] && cp -a "$VENDOR_RUNTIME/usr/bin/dbclient" "$STAGE_DIR/usr/bin/dbclient"
   [[ -x "$VENDOR_RUNTIME/usr/bin/scp" ]] && cp -a "$VENDOR_RUNTIME/usr/bin/scp" "$STAGE_DIR/usr/bin/scp"
-else
-  "$SCRIPT_DIR/build-dropbear.sh" "$CFG" "$OUT_DIR"
+  dropbear_ok=1
+# SSH is a convenience (remote recovery), NOT required for the GUI/tty recovery
+# session. Don't let a dropbear build failure abort the whole overlay — warn and
+# continue, mirroring the GUI's best-effort handling below.
+elif "$SCRIPT_DIR/build-dropbear.sh" "$CFG" "$OUT_DIR"; then
   cp -a "$OUT_DIR/tools/dropbear-out/${TARGET_ARCH}/dropbear" "$STAGE_DIR/usr/sbin/dropbear"
   cp -a "$OUT_DIR/tools/dropbear-out/${TARGET_ARCH}/dropbearkey" "$STAGE_DIR/usr/sbin/dropbearkey"
   cp -a "$OUT_DIR/tools/dropbear-out/${TARGET_ARCH}/dbclient" "$STAGE_DIR/usr/bin/dbclient"
   cp -a "$OUT_DIR/tools/dropbear-out/${TARGET_ARCH}/scp" "$STAGE_DIR/usr/bin/scp"
+  dropbear_ok=1
+else
+  echo "overlay: dropbear build failed; continuing without ssh (GUI/tty recovery unaffected)" >&2
 fi
-ln -snf /usr/bin/dbclient "$STAGE_DIR/usr/bin/ssh"
-chmod +x "$STAGE_DIR/usr/sbin/dropbear" "$STAGE_DIR/usr/sbin/dropbearkey" "$STAGE_DIR/usr/bin/dbclient" "$STAGE_DIR/usr/bin/scp" 2>/dev/null || true
+if [[ "$dropbear_ok" == "1" ]]; then
+  ln -snf /usr/bin/dbclient "$STAGE_DIR/usr/bin/ssh"
+  chmod +x "$STAGE_DIR/usr/sbin/dropbear" "$STAGE_DIR/usr/sbin/dropbearkey" "$STAGE_DIR/usr/bin/dbclient" "$STAGE_DIR/usr/bin/scp" 2>/dev/null || true
+fi
 
 # Keep framebuffer helpers available even when /usr is bind-mounted from overlay.
 overlay_fb_helpers=(peacock-splash)
