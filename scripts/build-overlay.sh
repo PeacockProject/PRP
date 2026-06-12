@@ -287,7 +287,12 @@ chmod +x "$STAGE_DIR/usr/bin/prp-gui"
 # Best-effort: bake host public keys into overlay for key-based login.
 if [[ -d "$HOME/.ssh" ]]; then
   auth_src=()
-  while IFS= read -r -d '' f; do auth_src+=("$f"); done < <(find "$HOME/.ssh" -maxdepth 1 -type f -name '*.pub' -print0 2>/dev/null || true)
+  # Temp file rather than process substitution (needs /dev/fd, absent in the
+  # build chroot).
+  _pub_list="$(mktemp)"
+  find "$HOME/.ssh" -maxdepth 1 -type f -name '*.pub' -print0 2>/dev/null > "$_pub_list" || true
+  while IFS= read -r -d '' f; do auth_src+=("$f"); done < "$_pub_list"
+  rm -f "$_pub_list"
   if [[ -f "$HOME/.ssh/authorized_keys" ]]; then
     auth_src+=("$HOME/.ssh/authorized_keys")
   fi

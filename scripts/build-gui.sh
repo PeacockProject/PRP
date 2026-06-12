@@ -112,7 +112,13 @@ ln -snf "$LVD_ABS" "$INC_ROOT/lv_drivers"
 cp -a "$PRP_ROOT/gui/lv_conf.h" "$INC_ROOT/lv_conf.h"
 cp -a "$PRP_ROOT/gui/lv_drv_conf.h" "$INC_ROOT/lv_drv_conf.h"
 
-mapfile -t LVGL_SRCS < <(find "$LVGL_DIR/src" -type f -name '*.c' | sort)
+# Read the source list via a temp file rather than process substitution
+# (`< <(...)`): process substitution needs /dev/fd, which isn't present in the
+# Peacock build chroot, so it fails with "/dev/fd/NN: No such file or directory".
+_lvgl_src_list="$(mktemp)"
+find "$LVGL_DIR/src" -type f -name '*.c' | sort > "$_lvgl_src_list"
+mapfile -t LVGL_SRCS < "$_lvgl_src_list"
+rm -f "$_lvgl_src_list"
 [[ "${#LVGL_SRCS[@]}" -gt 0 ]] || die "lvgl sources not found under $LVGL_DIR/src"
 
 SRCS=(
