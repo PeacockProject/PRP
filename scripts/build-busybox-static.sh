@@ -19,9 +19,11 @@ require_cmd sha256sum
 require_cmd file
 
 case "$TARGET_ARCH" in
-  aarch64) ;;
+  aarch64)                BB_ARCH="arm64"; BB_EXPECT="ARM aarch64" ;;
+  x86_64|amd64)           BB_ARCH="x86";   BB_EXPECT="x86-64" ;;
+  arm|armv7|armv7h|armhf) BB_ARCH="arm";   BB_EXPECT="ARM" ;;
   *)
-    die "busybox static builder currently supports only aarch64 (got: $TARGET_ARCH)"
+    die "busybox static builder: unsupported arch $TARGET_ARCH"
     ;;
 esac
 
@@ -72,7 +74,7 @@ p.write_text(s)
 PY
 
 make -j"$(nproc)" \
-  ARCH=arm64 \
+  ARCH="$BB_ARCH" \
   CROSS_COMPILE="" \
   CC="zig cc -target ${ZIG_TARGET}" \
   LD="zig cc -target ${ZIG_TARGET}" \
@@ -90,5 +92,5 @@ popd >/dev/null
 
 file_out="$(file "$OUT_BIN")"
 echo "$file_out"
-echo "$file_out" | grep -q "ARM aarch64" || die "built busybox is not aarch64"
+echo "$file_out" | grep -q "$BB_EXPECT" || die "built busybox is not $TARGET_ARCH ($BB_EXPECT)"
 echo "built busybox: $OUT_BIN"

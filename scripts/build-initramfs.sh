@@ -115,7 +115,7 @@ pick_working_busybox() {
 
   for c in "${cand[@]}"; do
     [[ -f "$c" ]] || continue
-    file "$c" | grep -Eq "ELF (64-bit|32-bit).* ARM" || continue
+    file "$c" | grep -Eq "ELF (64-bit|32-bit).*(ARM|x86-64)" || continue
     if busybox_smoke_ok "$c"; then
       echo "$c"
       return 0
@@ -131,11 +131,8 @@ if [[ -n "$picked_bb" ]]; then
   fi
   BB_PATH="$picked_bb"
 else
-  if [[ "$TARGET_ARCH" != "aarch64" ]]; then
-    die "no working busybox found for $TARGET_ARCH and no fallback builder available"
-  fi
-  echo "warning: no working cached busybox; rebuilding static busybox..." >&2
-  BB_PATH="$OUT_DIR/busybox-aarch64-static"
+  echo "warning: no working cached busybox; rebuilding static busybox for $TARGET_ARCH..." >&2
+  BB_PATH="$OUT_DIR/busybox-${TARGET_ARCH}-static"
   "$SCRIPT_DIR/build-busybox-static.sh" "$TARGET_ARCH" "$ZIG_TARGET" "$BB_PATH"
   busybox_smoke_ok "$BB_PATH" || die "rebuilt busybox failed smoke test (awk/grep)"
 fi
