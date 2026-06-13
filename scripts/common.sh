@@ -123,6 +123,7 @@ substitute_prp_init() {
     -e "s/@PRP_ENABLE_FB_IO@/${ENABLE_FB_IO}/g" \
     -e "s/@PRP_USE_FB_REFRESHER@/${USE_FB_REFRESHER}/g" \
     -e "s/@PRP_DEBUG_BOOT@/${DEBUG_BOOT}/g" \
+    -e "s/@PRP_PROBE_DEBUG_PARTITION@/${PROBE_DEBUG_PARTITION:-1}/g" \
     -e "s/@PRP_START_TTY_SHELLS@/${START_TTY_SHELLS}/g" \
     -e "s/@PRP_TEXT_CONSOLE_LOG@/${TEXT_CONSOLE_LOG}/g" \
     -e "s/@PRP_START_SSH@/${START_SSH:-1}/g" \
