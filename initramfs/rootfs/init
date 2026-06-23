@@ -1153,7 +1153,11 @@ EOF
     else
       log "net if=none"
     fi
-    if [ "$START_TELNET" = "1" ]; then
+    # Remote shell (telnet + raw tcpsvd) is an UNAUTHENTICATED root shell over
+    # TCP — a DEBUG-ONLY facility. Gate it on DEBUG_BOOT so a release recovery
+    # image never ships it (DEBUG_BOOT can still be flipped on at runtime via the
+    # debug cmdline for on-device bring-up). Was hardcoded on via START_TELNET=1.
+    if [ "$START_TELNET" = "1" ] && [ "$DEBUG_BOOT" = "1" ]; then
       # Clear stale listeners before starting a fresh shell service.
       $BB killall telnetd >/dev/null 2>&1 || true
       $BB killall tcpsvd >/dev/null 2>&1 || true
