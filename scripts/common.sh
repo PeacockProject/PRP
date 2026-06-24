@@ -230,6 +230,25 @@ resolve_kernel_image() {
     fi
   fi
 
+  # Fallback: extract the kernel image from the cached .feather package
+  # (kernels are feather-built now; the older candidates only knew .pkg.tar.gz).
+  shopt -s nullglob
+  for c in "$HOME"/.local/var/peacock/packages/*/"${kernel_pkg}"-[0-9]*.feather; do
+    [[ -f "$c" ]] || continue
+    local exdir="${TMPDIR:-/tmp}/prp-kernel-${kernel_pkg}"
+    rm -rf "$exdir"; mkdir -p "$exdir"
+    tar -xzf "$c" -C "$exdir" 2>/dev/null || continue
+    for k in "$exdir/files/boot/zImage" "$exdir/files/boot/Image.gz" \
+             "$exdir/files/boot/zImage-prp"; do
+      if [[ -f "$k" ]]; then
+        shopt -u nullglob
+        echo "$k"
+        return 0
+      fi
+    done
+  done
+  shopt -u nullglob
+
   die "could not resolve kernel image for package ${kernel_pkg}; set KERNEL_IMAGE in config or build ${kernel_pkg}"
 }
 
