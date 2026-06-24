@@ -1,0 +1,126 @@
+#!/bin/sh
+# prp-net — minimal Wi-Fi/DHCP helper for the PRP installer.
+#
+# Backed by wpa_supplicant + wpa_cli + busybox udhcpc. The installer GUI
+# forks this and reads result files (so the UI stays responsive):
+#
+#   prp-net scan              -> SSIDs, one per line, on stdout + /tmp/prp-net-scan
+#   prp-net connect <ssid> [psk]
+#                             -> writes "ok <ip>" or "fail <reason>" to
+#                                /tmp/prp-net-status; exit 0 on success
+#   prp-net status            -> "<ssid> <ip>" or "disconnected"
+#
+# Override the interface with PRP_NET_IFACE. Safe to call repeatedly.
+
+set -u
+
+IFACE="${PRP_NET_IFACE:-}"
+WPA_CONF=/tmp/prp-wpa.conf
+WPA_CTRL=/var/run/wpa_supplicant
+SCAN_OUT=/tmp/prp-net-scan
+STATUS_OUT=/tmp/prp-net-status
+
+log() { echo "prp-net: $*" >&2; }
+
+detect_iface() {
+	[ -n "$IFACE" ] && { echo "$IFACE"; return 0; }
+	for d in /sys/class/net/*; do
+		[ -e "$d" ] || continue
+		n=$(basename "$d")
+		if [ -d "$d/wireless" ] || [ -e "$d/phy80211" ]; then
+			echo "$n"; return 0
+		fi
+		case "$n" in wlan*|wlp*) echo "$n"; return 0 ;; esac
+	done
+	return 1
+}
+
+iface_up() {
+	ip link set "$1" up 2>/dev/null || ifconfig "$1" up 2>/dev/null || true
+}
+
+ensure_wpa() {
+	iface="$1"
+	iface_up "$iface"
+	if wpa_cli -i "$iface" status >/dev/null 2>&1; then
+		return 0
+	fi
+	mkdir -p "$WPA_CTRL"
+	[ -f "$WPA_CONF" ] || printf 'ctrl_interface=%s\nupdate_config=1\n' "$WPA_CTRL" >"$WPA_CONF"
+	wpa_supplicant -B -i "$iface" -c "$WPA_CONF" >/dev/null 2>&1
+	# wait for the control socket to come up
+	i=0
+	while [ "$i" -lt 10 ]; do
+		wpa_cli -i "$iface" status >/dev/null 2>&1 && return 0
+		i=$((i + 1)); sleep 1
+	done
+	return 1
+}
+
+cmd_scan() {
+	: >"$SCAN_OUT"
+	iface=$(detect_iface) || { log "no wifi interface"; return 1; }
+	ensure_wpa "$iface" || { log "wpa_supplicant not ready"; return 1; }
+	wpa_cli -i "$iface" scan >/dev/null 2>&1
+	sleep 3
+	# scan_results columns: bssid / freq / signal / flags / ssid(rest)
+	wpa_cli -i "$iface" scan_results 2>/dev/null \
+		| awk 'NR>1 { s=""; for (i=5;i<=NF;i++) s=s (i>5?" ":"") $i; if (s!="") print s }' \
+		| sort -u | grep -v '^$' >"$SCAN_OUT"
+	cat "$SCAN_OUT"
+}
+
+cmd_connect() {
+	ssid="$1"; psk="${2:-}"
+	: >"$STATUS_OUT"
+	iface=$(detect_iface) || { echo "fail no-interface" >"$STATUS_OUT"; return 1; }
+	ensure_wpa "$iface" || { echo "fail wpa-init" >"$STATUS_OUT"; return 1; }
+
+	# drop any existing networks so we start clean
+	for id in $(wpa_cli -i "$iface" list_networks 2>/dev/null | awk 'NR>1{print $1}'); do
+		wpa_cli -i "$iface" remove_network "$id" >/dev/null 2>&1
+	done
+	id=$(wpa_cli -i "$iface" add_network 2>/dev/null | tail -1)
+	wpa_cli -i "$iface" set_network "$id" ssid "\"$ssid\"" >/dev/null 2>&1
+	if [ -n "$psk" ]; then
+		wpa_cli -i "$iface" set_network "$id" psk "\"$psk\"" >/dev/null 2>&1
+	else
+		wpa_cli -i "$iface" set_network "$id" key_mgmt NONE >/dev/null 2>&1
+	fi
+	wpa_cli -i "$iface" enable_network "$id" >/dev/null 2>&1
+
+	i=0
+	while [ "$i" -lt 25 ]; do
+		st=$(wpa_cli -i "$iface" status 2>/dev/null | sed -n 's/^wpa_state=//p')
+		[ "$st" = "COMPLETED" ] && break
+		i=$((i + 1)); sleep 1
+	done
+	if [ "${st:-}" != "COMPLETED" ]; then
+		echo "fail auth" >"$STATUS_OUT"; log "association failed"; return 1
+	fi
+
+	udhcpc -i "$iface" -n -q >/dev/null 2>&1 || dhcpcd "$iface" >/dev/null 2>&1 || true
+	ip=$(ip -4 addr show "$iface" 2>/dev/null | sed -n 's/.*inet \([0-9.]*\).*/\1/p' | head -1)
+	if [ -n "$ip" ]; then
+		echo "ok $ip" >"$STATUS_OUT"; log "connected $ip"; return 0
+	fi
+	echo "fail dhcp" >"$STATUS_OUT"; log "dhcp failed"; return 1
+}
+
+cmd_status() {
+	iface=$(detect_iface) || { echo "disconnected"; return 0; }
+	ssid=$(wpa_cli -i "$iface" status 2>/dev/null | sed -n 's/^ssid=//p')
+	ip=$(ip -4 addr show "$iface" 2>/dev/null | sed -n 's/.*inet \([0-9.]*\).*/\1/p' | head -1)
+	if [ -n "$ssid" ] && [ -n "$ip" ]; then
+		echo "$ssid $ip"
+	else
+		echo "disconnected"
+	fi
+}
+
+case "${1:-}" in
+	scan)    cmd_scan ;;
+	connect) shift; [ $# -ge 1 ] || { log "connect needs <ssid>"; exit 2; }; cmd_connect "$@" ;;
+	status)  cmd_status ;;
+	*)       echo "usage: prp-net scan | connect <ssid> [psk] | status" >&2; exit 2 ;;
+esac

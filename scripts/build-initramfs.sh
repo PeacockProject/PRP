@@ -19,6 +19,7 @@ require_cmd python3
 
 load_config "$CFG"
 mkdir -p "$OUT_DIR"
+OUT_DIR="$(cd "$OUT_DIR" && pwd)"   # absolute — the cpio step cd's into the stage
 
 ROOTFS_SRC="$PRP_ROOT/$INITRAMFS_ROOTFS"
 [[ -d "$ROOTFS_SRC" ]] || die "initramfs rootfs source not found: $ROOTFS_SRC"
@@ -58,13 +59,15 @@ fi
 VENDOR_DIR="$PRP_ROOT/vendor/$TARGET_NAME"
 ROOTFS_RUNTIME_DIR="$VENDOR_DIR/rootfs-runtime"
 TWRP_SBIN_DIR="$VENDOR_DIR/twrp-sbin"
-if [[ "${REQUIRE_TWRP_SBIN:-1}" == "1" ]]; then
-  [[ -d "$TWRP_SBIN_DIR" ]] || die "missing twrp adb assets: $TWRP_SBIN_DIR (run 'make sync-assets')"
+# adb is opt-in (USE_ADB=1); only then are the TWRP adb assets required.
+if [[ "${USE_ADB:-0}" == "1" && "${REQUIRE_TWRP_SBIN:-1}" == "1" ]]; then
+  [[ -d "$TWRP_SBIN_DIR" ]] || die "USE_ADB=1 but twrp adb assets missing: $TWRP_SBIN_DIR (run 'make sync-assets')"
 fi
 
-# Install static busybox as the initramfs command backbone.
+# The initramfs command backbone is the feather-built static busybox (see
+# feather_busybox below, preferred). BUSYBOX_STATIC remains a legacy fallback.
 BB_PATH="${BUSYBOX_STATIC/#\~/$HOME}"
-[[ -f "$BB_PATH" ]] || die "static busybox not found: $BB_PATH"
+[[ -f "$BB_PATH" ]] || BB_PATH=""
 
 # How to execute a busybox of a given arch: "native" when it matches the
 # current machine (run directly — e.g. inside an aarch64 chroot where
@@ -104,11 +107,41 @@ busybox_smoke_ok() {
   return 0
 }
 
+# Extract the static busybox from its feather package (building it via peacock if
+# absent), so the initramfs uses the same feather-built busybox as the overlay —
+# not a scavenged or ad-hoc binary. Echoes the binary path, or nothing on failure.
+feather_busybox() {
+  local store fea peacock dst bb c
+  store="${PEACOCK_PKG_STORE:-$HOME/.local/var/peacock/packages/$TARGET_ARCH}"
+  fea="$(ls -1 "$store"/busybox-*-"$TARGET_ARCH".feather 2>/dev/null | head -1 || true)"
+  if [[ -z "$fea" ]]; then
+    peacock="${PEACOCK_BIN:-$(cd "$PRP_ROOT/.." && pwd)/Peacock/peacock}"
+    if [[ -x "$peacock" ]]; then
+      echo "initramfs: building feather busybox for $TARGET_ARCH..." >&2
+      PEACOCK_PORTS_DIR="${PEACOCK_PORTS_DIR:-$(cd "$PRP_ROOT/.." && pwd)/peacock-ports}" \
+        "$peacock" build-packages --arch "$TARGET_ARCH" -p busybox >&2 2>&1 || true
+      fea="$(ls -1 "$store"/busybox-*-"$TARGET_ARCH".feather 2>/dev/null | head -1 || true)"
+    fi
+  fi
+  [[ -n "$fea" ]] || return 1
+  dst="$OUT_DIR/busybox-feather"
+  rm -rf "$dst"; mkdir -p "$dst"
+  tar -xzf "$fea" -C "$dst" 2>/dev/null || return 1
+  for c in "$dst/files/usr/bin/busybox" "$dst/files/bin/busybox" "$dst/files/sbin/busybox"; do
+    [[ -f "$c" ]] && { bb="$c"; break; }
+  done
+  [[ -n "${bb:-}" ]] || return 1
+  echo "$bb"
+}
+
 pick_working_busybox() {
   local c=""
   local -a cand=()
+  local fbb=""
 
-  cand+=("$BB_PATH")
+  fbb="$(feather_busybox || true)"
+  [[ -n "$fbb" ]] && cand+=("$fbb")
+  [[ -n "$BB_PATH" ]] && cand+=("$BB_PATH")
   cand+=("$HOME/.local/var/peacock/busybox-cache/busybox-1.36.1-1-aarch64.pkg.tar.gz/busybox")
   cand+=("$HOME/.local/var/peacock/busybox-cache/busybox-1.36.1-1-armv7h.pkg.tar.gz/busybox")
   cand+=("$HOME/.local/var/peacock/build-chroot/x86_64/build/busybox-1.36.1-armv7/busybox")
@@ -126,9 +159,11 @@ pick_working_busybox() {
 
 picked_bb="$(pick_working_busybox || true)"
 if [[ -n "$picked_bb" ]]; then
-  if [[ "$picked_bb" != "$BB_PATH" ]]; then
-    echo "warning: configured busybox failed smoke test, using: $picked_bb" >&2
-  fi
+  case "$picked_bb" in
+    "$OUT_DIR/busybox-feather/"*) echo "initramfs: using feather busybox: $picked_bb" ;;
+    "$BB_PATH") : ;;
+    *) echo "warning: feather busybox unavailable, using fallback: $picked_bb" >&2 ;;
+  esac
   BB_PATH="$picked_bb"
 else
   echo "warning: no working cached busybox; rebuilding static busybox for $TARGET_ARCH..." >&2
@@ -284,23 +319,20 @@ else
   rm -f "$STAGE_DIR/usr/bin/msm-fb-refresher" "$STAGE_DIR/sbin/msm-fb-refresher"
 fi
 
-# Copy only required adb runtime files from twrp sync.
-twrp_runtime=(
-  adbd
-  linker
-  libc.so
-  libcutils.so
-  libm.so
-  libc++.so
-  libdl.so
-  liblog.so
-  libminadbd.so
-)
-for f in "${twrp_runtime[@]}"; do
-  if [[ -e "$TWRP_SBIN_DIR/$f" || -L "$TWRP_SBIN_DIR/$f" ]]; then
-    cp -a "$TWRP_SBIN_DIR/$f" "$STAGE_DIR/sbin/$f"
-  fi
-done
+# Android adbd is opt-in (USE_ADB=1). PRP handles remote access over SSH
+# (dropbear) via USB-RNDIS or Wi-Fi, so adbd — the only Android/TWRP-scavenged
+# component left — is off by default. start_adbd_usb in init still brings up the
+# USB gadget for SSH; it just won't find/launch adbd (already guarded there).
+if [[ "${USE_ADB:-0}" == "1" ]]; then
+  twrp_runtime=(
+    adbd linker libc.so libcutils.so libm.so libc++.so libdl.so liblog.so libminadbd.so
+  )
+  for f in "${twrp_runtime[@]}"; do
+    if [[ -e "$TWRP_SBIN_DIR/$f" || -L "$TWRP_SBIN_DIR/$f" ]]; then
+      cp -a "$TWRP_SBIN_DIR/$f" "$STAGE_DIR/sbin/$f"
+    fi
+  done
+fi
 
 # Ensure shebang interpreter for /init is executable and not overwritten.
 cp -a "$BB_PATH" "$STAGE_DIR/sbin/busybox"

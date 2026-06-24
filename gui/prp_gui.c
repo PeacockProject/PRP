@@ -26,21 +26,23 @@
 
 #include "prp_fbdev.h"
 #include "prp_logo.h"
+#include "prp_ui.h"
+#include "prp_wizard.h"
+#include "prp_net_ui.h"
 
 static volatile sig_atomic_t g_stop = 0;
 static uint32_t g_screen_w = 1080;
 static uint32_t g_screen_h = 1920;
 static int g_scale_pct = 100;
 static char g_logo_path[256] = {0};
-static lv_img_dsc_t *g_logo_dsc = NULL;
 
-static lv_obj_t *g_log_cont = NULL;
-static lv_obj_t *g_log_label = NULL;
-static char *g_log_buf = NULL;
-static size_t g_log_len = 0;
-static size_t g_log_cap = 0;
+static prp_wizard_cfg_t g_wiz;
+static void launch_wizard(void) { prp_wizard_show(&g_wiz); }
+static void launch_network(void) {
+    prp_net_ui_show((int)g_screen_w, (int)g_screen_h, g_scale_pct, NULL);
+}
 
-static lv_obj_t *g_pwr_overlay = NULL;
+
 
 static int g_pwr_fd = -1;
 static char g_pwr_input[128] = {0};
@@ -66,32 +68,6 @@ typedef struct {
 
 static prp_job_t g_job = {.fd = -1, .pid = -1, .running = false};
 
-static const char *pick_motto(void) {
-    static const char *mottos[] = {
-        "Put it all on the line",
-        "A series of dead ends",
-        "Hush now",
-        "Memories all plagued by the touch",
-        "Crimson fate",
-        "Let go",
-        "Won't matter, fall or rise",
-        "We needed a reason, fetch the gun, it's the season",
-    };
-    const size_t n = sizeof(mottos) / sizeof(mottos[0]);
-    struct timespec ts;
-    memset(&ts, 0, sizeof(ts));
-    (void)clock_gettime(CLOCK_MONOTONIC, &ts);
-    uint64_t x = ((uint64_t)ts.tv_sec << 32) ^ (uint64_t)ts.tv_nsec;
-    x ^= (uint64_t)(uintptr_t)&ts;
-    x ^= (uint64_t)getpid();
-    // xorshift64*
-    x ^= x >> 12;
-    x ^= x << 25;
-    x ^= x >> 27;
-    x *= 2685821657736338717ULL;
-    return mottos[(size_t)(x % n)];
-}
-
 static void on_sig(int sig) {
     (void)sig;
     g_stop = 1;
@@ -104,95 +80,25 @@ static uint64_t now_ms(void) {
     return (uint64_t)ts.tv_sec * 1000u + (uint64_t)ts.tv_nsec / 1000000u;
 }
 
-static void log_append_raw(const char *s, size_t n) {
-    if(!g_log_label || !s || n == 0) return;
-    if(!g_log_buf) {
-        g_log_cap = 8192;
-        g_log_buf = (char *)malloc(g_log_cap);
-        if(!g_log_buf) return;
-        g_log_len = 0;
-        g_log_buf[0] = '\0';
-    }
-
-    // Keep a bounded log buffer (retain the tail).
-    const size_t max_keep = 32768;
-    if(g_log_len > max_keep) {
-        size_t keep = max_keep / 2;
-        memmove(g_log_buf, g_log_buf + (g_log_len - keep), keep);
-        g_log_len = keep;
-        g_log_buf[g_log_len] = '\0';
-    }
-
-    // Ensure capacity.
-    size_t need = g_log_len + n + 1;
-    if(need > g_log_cap) {
-        size_t new_cap = g_log_cap;
-        while(new_cap < need) new_cap *= 2;
-        if(new_cap > 131072) new_cap = 131072;
-        if(new_cap < need) {
-            // If still too small, drop the oldest half and retry.
-            if(g_log_len > 0) {
-                size_t keep = g_log_len / 2;
-                memmove(g_log_buf, g_log_buf + (g_log_len - keep), keep);
-                g_log_len = keep;
-                g_log_buf[g_log_len] = '\0';
-            }
-            need = g_log_len + n + 1;
-        }
-        if(need > g_log_cap) {
-            char *nb = (char *)realloc(g_log_buf, new_cap);
-            if(nb) {
-                g_log_buf = nb;
-                g_log_cap = new_cap;
-            }
-        } else {
-            char *nb = (char *)realloc(g_log_buf, new_cap);
-            if(nb) {
-                g_log_buf = nb;
-                g_log_cap = new_cap;
-            }
-        }
-    }
-
-    if(need > g_log_cap) return;
-    memcpy(g_log_buf + g_log_len, s, n);
-    g_log_len += n;
-    g_log_buf[g_log_len] = '\0';
-
-    lv_label_set_text(g_log_label, g_log_buf);
-    if(g_log_cont) lv_obj_scroll_to_y(g_log_cont, 32767, LV_ANIM_OFF);
-}
-
-static void log_appendf(const char *fmt, ...) {
-    char tmp[1024];
-    va_list ap;
-    va_start(ap, fmt);
-    int n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
-    va_end(ap);
-    if(n <= 0) return;
-    if((size_t)n >= sizeof(tmp)) n = (int)sizeof(tmp) - 1;
-    log_append_raw(tmp, (size_t)n);
-}
-
 static void start_cmd(const char *cmd) {
     if(!cmd) return;
     if(g_job.running) {
-        log_appendf("\n[busy] previous command still running (pid=%d)\n", (int)g_job.pid);
+        prp_ui_log_appendf("\n[busy] previous command still running (pid=%d)\n", (int)g_job.pid);
         return;
     }
 
-    log_appendf("\n$ %s\n", cmd);
+    prp_ui_log_appendf("\n$ %s\n", cmd);
 
     int pfd[2];
     if(pipe(pfd) != 0) {
-        log_appendf("[err] pipe failed: %s\n", strerror(errno));
+        prp_ui_log_appendf("[err] pipe failed: %s\n", strerror(errno));
         return;
     }
     (void)fcntl(pfd[0], F_SETFL, O_NONBLOCK);
 
     pid_t pid = fork();
     if(pid < 0) {
-        log_appendf("[err] fork failed: %s\n", strerror(errno));
+        prp_ui_log_appendf("[err] fork failed: %s\n", strerror(errno));
         close(pfd[0]);
         close(pfd[1]);
         return;
@@ -362,140 +268,8 @@ static void try_late_touch_attach(void) {
     fprintf(stderr, "prp-gui: touch input attached late: %s\n", ev_path);
 }
 
-static void btn_cmd_cb(lv_event_t *e) {
-    const char *cmd = (const char *)lv_event_get_user_data(e);
-    start_cmd(cmd);
-}
+#include "prp_theme.h"
 
-static int clampi(int v, int lo, int hi) {
-    if(v < lo) return lo;
-    if(v > hi) return hi;
-    return v;
-}
-
-static const lv_font_t *pick_font_title(int scale_pct, int w, int h) {
-    int tier = 0;
-    if(scale_pct >= 140) tier = 2;
-    else if(scale_pct >= 105) tier = 1;
-    // Large panels (e.g. 1080x1920) need a bump even at 100%.
-    if(h >= 1600 || w >= 900) tier++;
-    if(tier <= 0) return &lv_font_montserrat_24;
-    if(tier == 1) return &lv_font_montserrat_28;
-    return &lv_font_montserrat_32;
-}
-
-static const lv_font_t *pick_font_hint(int scale_pct, int w, int h) {
-    int tier = 0;
-    if(scale_pct >= 140) tier = 2;
-    else if(scale_pct >= 105) tier = 1;
-    if(h >= 1600 || w >= 900) tier++;
-    if(tier <= 0) return &lv_font_montserrat_16;
-    if(tier == 1) return &lv_font_montserrat_20;
-    return &lv_font_montserrat_24;
-}
-
-static const lv_font_t *pick_font_body(int scale_pct, int w, int h) {
-    int tier = 0;
-    if(scale_pct >= 140) tier = 2;
-    else if(scale_pct >= 105) tier = 1;
-    if(h >= 1600 || w >= 900) tier++;
-    if(tier <= 0) return &lv_font_montserrat_20;
-    if(tier == 1) return &lv_font_montserrat_24;
-    return &lv_font_montserrat_28;
-}
-
-static void power_menu_hide(void);
-
-static void power_menu_cmd_cb(lv_event_t *e) {
-    const char *cmd = (const char *)lv_event_get_user_data(e);
-    power_menu_hide();
-    if(cmd && *cmd) start_cmd(cmd);
-}
-
-static void power_menu_bg_cb(lv_event_t *e) {
-    (void)e;
-    power_menu_hide();
-}
-
-static void power_menu_hide(void) {
-    if(!g_pwr_overlay) return;
-    lv_obj_del(g_pwr_overlay);
-    g_pwr_overlay = NULL;
-}
-
-static void power_menu_show(void) {
-    if(g_pwr_overlay) return;
-
-    lv_obj_t *scr = lv_scr_act();
-    const int w = (int)g_screen_w;
-    const int h = (int)g_screen_h;
-    const int scale = clampi(g_scale_pct, 50, 200);
-    const int margin = clampi((h / 36) * scale / 100, 8, 80);
-    const int gap = clampi((h / 64) * scale / 100, 6, 48);
-    const lv_font_t *font_title = pick_font_title(scale, w, h);
-    const lv_font_t *font_body = pick_font_body(scale, w, h);
-
-    g_pwr_overlay = lv_obj_create(scr);
-    lv_obj_set_size(g_pwr_overlay, w, h);
-    lv_obj_align(g_pwr_overlay, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_set_style_bg_color(g_pwr_overlay, lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(g_pwr_overlay, LV_OPA_60, 0);
-    lv_obj_set_style_border_width(g_pwr_overlay, 0, 0);
-    lv_obj_set_style_radius(g_pwr_overlay, 0, 0);
-    lv_obj_add_event_cb(g_pwr_overlay, power_menu_bg_cb, LV_EVENT_CLICKED, NULL);
-
-    const int dlg_w = clampi(w - 2 * margin, 360, 720);
-    const int dlg_h = clampi(h / 3, 240, 560);
-    lv_obj_t *dlg = lv_obj_create(g_pwr_overlay);
-    lv_obj_set_size(dlg, dlg_w, dlg_h);
-    lv_obj_center(dlg);
-    lv_obj_set_style_bg_color(dlg, lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(dlg, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(dlg, lv_color_white(), 0);
-    lv_obj_set_style_border_width(dlg, 2, 0);
-    lv_obj_set_style_radius(dlg, 12, 0);
-    lv_obj_set_style_pad_all(dlg, gap, 0);
-    lv_obj_set_style_pad_gap(dlg, gap, 0);
-    lv_obj_set_flex_flow(dlg, LV_FLEX_FLOW_COLUMN);
-
-    lv_obj_t *ttl = lv_label_create(dlg);
-    lv_label_set_text(ttl, "Power");
-    lv_obj_set_style_text_color(ttl, lv_color_white(), 0);
-    lv_obj_set_style_text_font(ttl, font_title, 0);
-    lv_obj_align(ttl, LV_ALIGN_TOP_MID, 0, 0);
-
-    struct {
-        const char *label;
-        const char *cmd;
-    } acts[] = {
-        {"Reboot", k_cmd_reboot},
-        {"Power off", k_cmd_poweroff},
-        {"Cancel", NULL},
-    };
-
-    for(size_t i = 0; i < sizeof(acts) / sizeof(acts[0]); i++) {
-        lv_obj_t *btn = lv_btn_create(dlg);
-        lv_obj_set_width(btn, lv_pct(100));
-        lv_obj_set_height(btn, clampi(h / 14, 72, 160));
-        lv_obj_set_style_bg_color(btn, lv_color_make(0x10, 0x10, 0x10), 0);
-        lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
-        lv_obj_set_style_border_color(btn, lv_color_white(), 0);
-        lv_obj_set_style_border_width(btn, 2, 0);
-        lv_obj_set_style_radius(btn, 10, 0);
-        lv_obj_add_event_cb(btn, power_menu_cmd_cb, LV_EVENT_CLICKED, (void *)acts[i].cmd);
-
-        lv_obj_t *lab = lv_label_create(btn);
-        lv_label_set_text(lab, acts[i].label);
-        lv_obj_set_style_text_font(lab, font_body, 0);
-        lv_obj_set_style_text_color(lab, lv_color_white(), 0);
-        lv_obj_center(lab);
-    }
-}
-
-static void appbar_long_press_cb(lv_event_t *e) {
-    (void)e;
-    power_menu_show();
-}
 
 static int power_hint_score(const char *name, const char *hints) {
     if(!name || !*name || !hints || !*hints) return 0;
@@ -597,217 +371,8 @@ static void power_key_poll(void) {
 
     if(g_pwr_down && !g_pwr_menu_shown) {
         if(now_ms() - g_pwr_down_ms >= 800) {
-            power_menu_show();
+            prp_ui_power_menu_show();
             g_pwr_menu_shown = true;
-        }
-    }
-}
-
-static void build_ui(void) {
-    const int w = (int)g_screen_w;
-    const int h = (int)g_screen_h;
-    const int scale = clampi(g_scale_pct, 50, 200);
-    const int margin = clampi((h / 36) * scale / 100, 8, 80);
-    const int gap = clampi((h / 64) * scale / 100, 6, 48);
-    const int appbar_pad = clampi(gap / 2, 8, 28);
-
-    const lv_font_t *font_title = pick_font_title(scale, w, h);
-    const lv_font_t *font_hint = pick_font_hint(scale, w, h);
-    const lv_font_t *font_body = pick_font_body(scale, w, h);
-
-    lv_obj_t *scr = lv_scr_act();
-    lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
-    /* Important: ensure the screen is opaque. On real fbdev, leaving bg_opa at default
-       can make the background effectively "transparent", showing whatever the kernel/boot
-       stage left in the framebuffer (often red). */
-    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
-    lv_obj_set_style_text_color(scr, lv_color_white(), 0);
-    lv_obj_set_style_text_font(scr, font_body, 0);
-
-    /* AppBar-style header */
-    const int appbar_extra = clampi((h / 80) * scale / 100, 6, 28);
-    const int appbar_h = clampi((int)font_title->line_height + appbar_pad * 2 + appbar_extra, 72, 260);
-    lv_obj_t *appbar = lv_obj_create(scr);
-    lv_obj_set_size(appbar, w, appbar_h);
-    lv_obj_align(appbar, LV_ALIGN_TOP_MID, 0, 0);
-    lv_obj_set_style_bg_color(appbar, lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(appbar, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(appbar, 0, 0);
-    lv_obj_set_style_radius(appbar, 0, 0);
-    lv_obj_set_style_pad_left(appbar, appbar_pad, 0);
-    lv_obj_set_style_pad_right(appbar, appbar_pad, 0);
-    lv_obj_set_style_pad_top(appbar, appbar_pad, 0);
-    lv_obj_set_style_pad_bottom(appbar, appbar_pad, 0);
-    lv_obj_set_scroll_dir(appbar, LV_DIR_VER);
-    lv_obj_set_scrollbar_mode(appbar, LV_SCROLLBAR_MODE_OFF);
-    lv_obj_add_event_cb(appbar, appbar_long_press_cb, LV_EVENT_LONG_PRESSED, NULL);
-
-    /* Thin separator under the header. */
-    const int sep_h = (scale >= 140) ? 3 : 2;
-    lv_obj_t *sep = lv_obj_create(scr);
-    lv_obj_set_size(sep, w, sep_h);
-    lv_obj_align(sep, LV_ALIGN_TOP_MID, 0, appbar_h);
-    lv_obj_set_style_bg_color(sep, lv_color_white(), 0);
-    lv_obj_set_style_bg_opa(sep, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(sep, 0, 0);
-    lv_obj_set_style_radius(sep, 0, 0);
-
-    // Optional logo image loaded from the prepared PRP runtime.
-    if(!g_logo_dsc) {
-        const char *paths[12];
-        size_t pi = 0;
-        if(g_logo_path[0]) paths[pi++] = g_logo_path;
-        paths[pi++] = "/etc/prp/header_logo.png";
-        paths[pi++] = "/etc/prp/logo_header.png";
-        paths[pi++] = "/etc/header_logo.png";
-        paths[pi++] = "/mnt/prp_rootfs/etc/prp/header_logo.png";
-        paths[pi++] = "/mnt/prp_rootfs/etc/prp/logo_header.png";
-        paths[pi++] = "/mnt/prp_rootfs/etc/header_logo.png";
-        paths[pi++] = "header_logo.png";
-        paths[pi++] = "logo_header.png";
-        paths[pi] = NULL;
-        g_logo_dsc = prp_logo_try_load(paths);
-    }
-
-    lv_obj_t *title = lv_label_create(appbar);
-    lv_label_set_text(title, "PRP Recovery");
-    lv_obj_set_style_text_font(title, font_title, 0);
-    lv_obj_set_style_text_color(title, lv_color_white(), 0);
-    lv_obj_align(title, LV_ALIGN_RIGHT_MID, -appbar_pad, 0);
-
-    const int inner_w = w - 2 * margin;
-
-    if(g_logo_dsc) {
-        const int max_h = appbar_h - 6;
-        const int max_w = clampi(inner_w / 3, 96, inner_w / 2);
-        const int iw = (int)g_logo_dsc->header.w;
-        const int ih = (int)g_logo_dsc->header.h;
-
-        uint32_t z = 256;
-        if(iw > 0 && ih > 0) {
-            uint32_t zx = (uint32_t)max_w * 256u / (uint32_t)iw;
-            uint32_t zy = (uint32_t)max_h * 256u / (uint32_t)ih;
-            z = zx < zy ? zx : zy;
-            if(z > 768u) z = 768u;
-            if(z < 64u) z = 64u;
-        }
-
-        lv_obj_t *img = lv_img_create(appbar);
-        lv_img_set_src(img, g_logo_dsc);
-        lv_img_set_antialias(img, false);
-        lv_img_set_size_mode(img, LV_IMG_SIZE_MODE_REAL);
-        lv_img_set_zoom(img, (uint16_t)z);
-        lv_obj_align(img, LV_ALIGN_LEFT_MID, appbar_pad, 0);
-    }
-
-    // Hidden "motto" below the AppBar contents. Visible only if the user scrolls the header.
-    lv_obj_t *motto = lv_label_create(appbar);
-    lv_label_set_text(motto, pick_motto());
-    lv_label_set_long_mode(motto, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(motto, w - 2 * appbar_pad);
-    lv_obj_set_style_text_font(motto, font_hint, 0);
-    lv_obj_set_style_text_color(motto, lv_color_make(0xE0, 0xE0, 0xE0), 0);
-    lv_obj_align(motto, LV_ALIGN_TOP_MID, 0, appbar_h + appbar_pad);
-
-    struct {
-        const char *label;
-        const char *cmd;
-    } buttons[] = {
-        {"Shell (tty1)", "setsid cttyhack /bin/sh </dev/tty1 >/dev/tty1 2>&1 &"},
-        {"Start SSH", "PRP_SSH_ALLOW_BLANK_PASSWORD=1 PRP_SSH_PORT=22 /usr/bin/prp-svc-ssh >/tmp/prp-ssh.log 2>&1; /sbin/busybox sleep 1; if /sbin/busybox pidof dropbear >/dev/null 2>&1; then echo ssh_up port=22; else echo ssh_down; /sbin/busybox head -n 20 /tmp/prp-ssh.log; fi"},
-        {"Mount Peacock", k_cmd_mount_subparts},
-    };
-    const int btn_cols = 2;
-    const int btn_count = (int)(sizeof(buttons) / sizeof(buttons[0]));
-    const int btn_rows = (btn_count + btn_cols - 1) / btn_cols;
-
-    // Layout: buttons in the upper area, "stdout" log fixed at the bottom.
-    const int top_y = appbar_h + sep_h + margin;
-
-    // Bottom "stdout" area (max half screen height).
-    const int log_h_default = clampi((h / 3) * scale / 100, 120, h / 2);
-
-    // Prefer a large, tappable button height on phones.
-    int btn_h_want = clampi((h / 8) * scale / 100, 96, 320);
-    const int btn_area_h_want = btn_h_want * btn_rows + gap * (btn_rows - 1);
-
-    // Compute how much log height we can afford if we keep buttons large.
-    int log_h_max_for_btn = (h - margin) - top_y - gap - btn_area_h_want;
-    if(log_h_max_for_btn > h / 2) log_h_max_for_btn = h / 2;
-
-    int log_h = log_h_default;
-    if(log_h_max_for_btn >= 120) {
-        // Keep buttons big; cap the log height accordingly.
-        if(log_h > log_h_max_for_btn) log_h = log_h_max_for_btn;
-    } else {
-        // Not enough space: keep a minimum log height and shrink buttons to fit.
-        log_h = 120;
-        int available = (h - margin - log_h) - top_y - gap;
-        int btn_h_max = (available - gap * (btn_rows - 1)) / btn_rows;
-        btn_h_want = clampi(btn_h_want, 64, btn_h_max > 0 ? btn_h_max : 64);
-    }
-
-    const int btn_area_h = btn_h_want * btn_rows + gap * (btn_rows - 1);
-
-    // Stdout window (bottom). Shows output of actions.
-    g_log_cont = lv_obj_create(scr);
-    lv_obj_set_size(g_log_cont, inner_w, log_h);
-    lv_obj_align(g_log_cont, LV_ALIGN_BOTTOM_MID, 0, -margin);
-    lv_obj_set_style_bg_color(g_log_cont, lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(g_log_cont, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_color(g_log_cont, lv_color_make(0x40, 0x40, 0x40), 0);
-    lv_obj_set_style_border_width(g_log_cont, 2, 0);
-    lv_obj_set_style_radius(g_log_cont, 6, 0);
-    lv_obj_set_style_pad_all(g_log_cont, 10, 0);
-    lv_obj_set_scroll_dir(g_log_cont, LV_DIR_VER);
-    lv_obj_set_scrollbar_mode(g_log_cont, LV_SCROLLBAR_MODE_AUTO);
-
-    g_log_label = lv_label_create(g_log_cont);
-    lv_obj_set_width(g_log_label, lv_pct(100));
-    lv_label_set_long_mode(g_log_label, LV_LABEL_LONG_WRAP);
-    lv_obj_set_style_text_font(g_log_label, font_hint, 0);
-    lv_obj_set_style_text_color(g_log_label, lv_color_white(), 0);
-    lv_label_set_text(g_log_label, "");
-
-    lv_obj_t *btn_area = lv_obj_create(scr);
-    lv_obj_set_size(btn_area, inner_w, btn_area_h);
-    lv_obj_align(btn_area, LV_ALIGN_TOP_MID, 0, top_y);
-    lv_obj_set_style_bg_color(btn_area, lv_color_black(), 0);
-    lv_obj_set_style_bg_opa(btn_area, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(btn_area, 0, 0);
-    lv_obj_set_style_pad_all(btn_area, 0, 0);
-    lv_obj_set_flex_flow(btn_area, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_style_pad_gap(btn_area, gap, 0);
-
-    const int btn_h = btn_h_want;
-    const int btn_w = (inner_w - gap) / 2;
-
-    for(int row = 0; row < btn_rows; row++) {
-        lv_obj_t *rowc = lv_obj_create(btn_area);
-        lv_obj_set_style_bg_color(rowc, lv_color_black(), 0);
-        lv_obj_set_style_bg_opa(rowc, LV_OPA_COVER, 0);
-        lv_obj_set_style_border_width(rowc, 0, 0);
-        lv_obj_set_style_pad_all(rowc, 0, 0);
-        lv_obj_set_size(rowc, lv_pct(100), btn_h);
-        lv_obj_set_flex_flow(rowc, LV_FLEX_FLOW_ROW);
-        lv_obj_set_style_pad_gap(rowc, gap, 0);
-
-        for(int col = 0; col < btn_cols; col++) {
-            int idx = row * btn_cols + col;
-            if(idx >= btn_count) continue;
-            lv_obj_t *btn = lv_btn_create(rowc);
-            lv_obj_set_size(btn, btn_w, btn_h);
-            lv_obj_set_style_bg_color(btn, lv_color_make(0x10, 0x10, 0x10), 0);
-            lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
-            lv_obj_set_style_border_color(btn, lv_color_white(), 0);
-            lv_obj_set_style_border_width(btn, 2, 0);
-            lv_obj_set_style_radius(btn, 8, 0);
-            lv_obj_add_event_cb(btn, btn_cmd_cb, LV_EVENT_CLICKED, (void *)buttons[idx].cmd);
-
-            lv_obj_t *lab = lv_label_create(btn);
-            lv_label_set_text(lab, buttons[idx].label);
-            lv_obj_set_style_text_font(lab, font_body, 0);
-            lv_obj_center(lab);
         }
     }
 }
@@ -988,7 +553,7 @@ int main(int argc, char **argv) {
     lv_disp_t *disp = lv_disp_drv_register(&disp_drv);
     // Be explicit about an opaque black display background to avoid inheriting whatever
     // a previous boot stage left in fb0.
-    lv_disp_set_bg_color(disp, lv_color_black());
+    lv_disp_set_bg_color(disp, lv_color_hex(PK_BG));
     lv_disp_set_bg_opa(disp, LV_OPA_COVER);
 
     // Input (touch)
@@ -1039,7 +604,64 @@ int main(int argc, char **argv) {
         }
     }
 
-    build_ui();
+    const char *logo_paths[12];
+    size_t li = 0;
+    if(g_logo_path[0]) logo_paths[li++] = g_logo_path;
+    logo_paths[li++] = "/etc/prp/header_logo.png";
+    logo_paths[li++] = "/etc/prp/logo_header.png";
+    logo_paths[li++] = "/etc/header_logo.png";
+    logo_paths[li++] = "/mnt/prp_rootfs/etc/prp/header_logo.png";
+    logo_paths[li++] = "/mnt/prp_rootfs/etc/prp/logo_header.png";
+    logo_paths[li++] = "/mnt/prp_rootfs/etc/header_logo.png";
+    logo_paths[li++] = "header_logo.png";
+    logo_paths[li++] = "logo_header.png";
+    logo_paths[li] = NULL;
+
+    const prp_ui_item_t buttons[] = {
+        {"Terminal", "Open a command shell on the device", LV_SYMBOL_KEYBOARD,
+         "setsid cttyhack /bin/sh </dev/tty1 >/dev/tty1 2>&1 &"},
+        {"Remote access", "Connect from a computer over SSH (port 22)", LV_SYMBOL_WIFI,
+         "PRP_SSH_ALLOW_BLANK_PASSWORD=1 PRP_SSH_PORT=22 /usr/bin/prp-svc-ssh >/tmp/prp-ssh.log 2>&1; /sbin/busybox sleep 1; if /sbin/busybox pidof dropbear >/dev/null 2>&1; then echo ssh_up port=22; else echo ssh_down; /sbin/busybox head -n 20 /tmp/prp-ssh.log; fi"},
+        {"Mount system", "Mount the Peacock partitions", LV_SYMBOL_DRIVE, k_cmd_mount_subparts},
+    };
+    const prp_ui_item_t power_items[] = {
+        {"Reboot", NULL, NULL, k_cmd_reboot},
+        {"Power off", NULL, NULL, k_cmd_poweroff},
+        {"Cancel", NULL, NULL, NULL},
+    };
+
+    prp_ui_cfg_t ui_cfg = {0};
+    ui_cfg.screen_w = (int)g_screen_w;
+    ui_cfg.screen_h = (int)g_screen_h;
+    ui_cfg.scale_pct = g_scale_pct;
+    ui_cfg.logo_paths = logo_paths;
+    ui_cfg.buttons = buttons;
+    ui_cfg.n_buttons = (int)(sizeof(buttons) / sizeof(buttons[0]));
+    ui_cfg.power_items = power_items;
+    ui_cfg.n_power = (int)(sizeof(power_items) / sizeof(power_items[0]));
+    ui_cfg.run_cmd = start_cmd;
+
+    static char reason_buf[512];
+    if(read_file_trim("/etc/prp/reason", reason_buf, sizeof(reason_buf)) ||
+       read_file_trim("/tmp/prp-reason", reason_buf, sizeof(reason_buf))) {
+        ui_cfg.reason = reason_buf;   // set by the OS handoff when it diverts to recovery
+    }
+    ui_cfg.help_url = "https://wiki.peacockos.org/recovery";
+
+    g_wiz.screen_w = (int)g_screen_w;
+    g_wiz.screen_h = (int)g_screen_h;
+    g_wiz.scale_pct = g_scale_pct;
+    g_wiz.device_name = "this device";
+    g_wiz.device_codename = "";
+    g_wiz.flavors = "Arch\nDebian\nAlpine";
+    g_wiz.inits = "systemd\nOpenRC";
+    g_wiz.desktops = "None\nXFCE\nKDE Plasma\nGNOME\nMATE\nCinnamon\nLXQt";
+    g_wiz.dms = "None\nSDDM\nLightDM\ngreetd\nGDM\nly";
+    g_wiz.disks = "Internal storage";
+    g_wiz.wifi_ssids = "(Wi-Fi scan coming soon)";   /* prp-net wires real scanning */
+    ui_cfg.on_install = launch_wizard;
+    ui_cfg.on_network = launch_network;
+    prp_ui_build(&ui_cfg);
     // Force an initial full-screen redraw even if LVGL decides the invalid area is smaller.
     lv_obj_invalidate(lv_scr_act());
     lv_refr_now(disp);
@@ -1052,7 +674,7 @@ int main(int argc, char **argv) {
             for(;;) {
                 ssize_t n = read(g_job.fd, buf, sizeof(buf));
                 if(n > 0) {
-                    log_append_raw(buf, (size_t)n);
+                    prp_ui_log_append(buf, (size_t)n);
                     continue;
                 }
                 if(n == 0) {
@@ -1062,17 +684,17 @@ int main(int argc, char **argv) {
                     g_job.fd = -1;
                     g_job.running = false;
                     if(wr > 0) {
-                        if(WIFEXITED(st)) log_appendf("[exit] code=%d\n", WEXITSTATUS(st));
-                        else if(WIFSIGNALED(st)) log_appendf("[exit] signal=%d\n", WTERMSIG(st));
-                        else log_appendf("[exit] done\n");
+                        if(WIFEXITED(st)) prp_ui_log_appendf("[exit] code=%d\n", WEXITSTATUS(st));
+                        else if(WIFSIGNALED(st)) prp_ui_log_appendf("[exit] signal=%d\n", WTERMSIG(st));
+                        else prp_ui_log_appendf("[exit] done\n");
                     } else {
-                        log_appendf("[exit] done\n");
+                        prp_ui_log_appendf("[exit] done\n");
                     }
                     break;
                 }
                 if(errno == EINTR) continue;
                 if(errno == EAGAIN || errno == EWOULDBLOCK) break;
-                log_appendf("[err] read: %s\n", strerror(errno));
+                prp_ui_log_appendf("[err] read: %s\n", strerror(errno));
                 break;
             }
         }

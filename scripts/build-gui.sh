@@ -81,6 +81,13 @@ OUT_BIN="$OUT_BIN_DIR/prp-gui"
 if [[ -f "$OUT_BIN" \
   && "$OUT_BIN" -nt "$SCRIPT_DIR/build-gui.sh" \
   && "$OUT_BIN" -nt "$PRP_ROOT/gui/prp_gui.c" \
+  && "$OUT_BIN" -nt "$PRP_ROOT/gui/prp_ui.c" \
+  && "$OUT_BIN" -nt "$PRP_ROOT/gui/prp_ui.h" \
+  && "$OUT_BIN" -nt "$PRP_ROOT/gui/prp_wizard.c" \
+  && "$OUT_BIN" -nt "$PRP_ROOT/gui/prp_wizard.h" \
+  && "$OUT_BIN" -nt "$PRP_ROOT/gui/prp_net_ui.c" \
+  && "$OUT_BIN" -nt "$PRP_ROOT/gui/prp_net_ui.h" \
+  && "$OUT_BIN" -nt "$PRP_ROOT/gui/prp_theme.h" \
   && "$OUT_BIN" -nt "$PRP_ROOT/gui/prp_fbdev.c" \
   && "$OUT_BIN" -nt "$PRP_ROOT/gui/prp_fbdev.h" \
   && "$OUT_BIN" -nt "$PRP_ROOT/gui/prp_logo.c" \
@@ -126,6 +133,14 @@ SRCS=(
   "$LVD_DIR/indev/evdev.c"
   "$PRP_ROOT/gui/prp_fbdev.c"
   "$PRP_ROOT/gui/prp_logo.c"
+  "$PRP_ROOT/gui/fonts/pk_serif_30.c"
+  "$PRP_ROOT/gui/fonts/pk_serif_44.c"
+  "$PRP_ROOT/gui/fonts/pk_mono_16.c"
+  "$PRP_ROOT/gui/fonts/pk_mono_20.c"
+  "$PRP_ROOT/gui/fonts/pk_mono_26.c"
+  "$PRP_ROOT/gui/prp_ui.c"
+  "$PRP_ROOT/gui/prp_wizard.c"
+  "$PRP_ROOT/gui/prp_net_ui.c"
   "$PRP_ROOT/gui/prp_gui.c"
 )
 

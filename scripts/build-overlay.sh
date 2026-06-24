@@ -17,6 +17,9 @@ require_cmd sha256sum
 load_config "$CFG"
 mkdir -p "$OUT_DIR"
 
+# Feather installs full packages, but peacock_tidy (build-time strip + drop .a)
+# and the trim below (locale/man/doc/headers/.static) keep the rootfs lean
+# (~20M), so the original 60M partition still fits. Override per device if needed.
 OVERLAY_SIZE_MB="${OVERLAY_SIZE_MB:-60}"
 OVERLAY_LABEL="${OVERLAY_LABEL:-PRP_ROOTFS}"
 PRP_OVERLAY_STAGE_ONLY="${PRP_OVERLAY_STAGE_ONLY:-0}"
@@ -36,10 +39,20 @@ fi
 STAGE_DIR="$OUT_DIR/overlay-stage"
 IMG="$OUT_DIR/prp-rootfs.img"
 
+# Build the PRP package set via feather and assemble it into a staging rootfs.
+# This is the source of truth for PRP's binaries (busybox, dropbear, util-linux,
+# peacock-splash, prp-gui, prp-runtime — dependency-resolved + signature-verified
+# by ftr). The overlay-specific config + wrappers are layered on top below. The
+# legacy scavenging blocks remain only as fallbacks when a package is absent.
+FEATHER_STAGE="$("$SCRIPT_DIR/assemble-rootfs-feather.sh" "$CFG" "$OUT_DIR" | tail -1)"
+[[ -d "$FEATHER_STAGE" ]] || die "feather assembly failed (stage not found: $FEATHER_STAGE)"
+
 rm -rf "$STAGE_DIR"
 mkdir -p "$STAGE_DIR"
 
-# Base template (empty by default, script creates the structure we need).
+# Base the overlay on the feather-assembled rootfs, then layer the template
+# (overlay-specific config + scripts) on top.
+cp -a "$FEATHER_STAGE"/. "$STAGE_DIR"/
 TEMPLATE_DIR="$PRP_ROOT/overlay/rootfs"
 [[ -d "$TEMPLATE_DIR" ]] || die "overlay template missing: $TEMPLATE_DIR"
 cp -a "$TEMPLATE_DIR"/. "$STAGE_DIR"/
@@ -114,10 +127,18 @@ done
 # Ensure any template-provided scripts are executable.
 find "$STAGE_DIR/usr/bin" -maxdepth 1 -type f -print0 2>/dev/null | xargs -0r chmod +x || true
 
-# Include a standalone busybox on the overlay so PRP_ROOTFS can be used as a "toolbox" partition.
-BB_PATH="${BUSYBOX_STATIC/#\~/$HOME}"
-[[ -f "$BB_PATH" ]] || die "static busybox not found: $BB_PATH"
-cp -a "$BB_PATH" "$STAGE_DIR/sbin/busybox"
+# busybox comes from the feather package (installs to usr/bin/busybox). Expose it
+# at /sbin/busybox for the applet symlinks + init shebangs. Fall back to the
+# static cache only if feather didn't provide it.
+if [[ ! -x "$STAGE_DIR/sbin/busybox" ]]; then
+  if [[ -x "$STAGE_DIR/usr/bin/busybox" ]]; then
+    cp -a "$STAGE_DIR/usr/bin/busybox" "$STAGE_DIR/sbin/busybox"
+  else
+    BB_PATH="${BUSYBOX_STATIC/#\~/$HOME}"
+    [[ -f "$BB_PATH" ]] || die "busybox not provided by feather and no static fallback: $BB_PATH"
+    cp -a "$BB_PATH" "$STAGE_DIR/sbin/busybox"
+  fi
+fi
 chmod +x "$STAGE_DIR/sbin/busybox"
 ln -snf /sbin/busybox "$STAGE_DIR/bin/sh"
 
@@ -209,11 +230,11 @@ VENDOR_RUNTIME="$PRP_ROOT/vendor/$TARGET_NAME/rootfs-runtime"
 # Prefer distro/runtime binaries synced from the target rootfs; fall back to
 # local static cross-build when unavailable.
 dropbear_ok=0
-# Prefer dropbear provided as a build_dep_package: the `dropbear` peacock port
-# builds a static-musl dropbear ONCE (cached as a feather) and ftr-installs it
-# into the build chroot at /usr/sbin/dropbear. Then a vendored runtime. Building
-# from source inline (build-dropbear.sh) is the last resort.
-if [[ -x /usr/sbin/dropbear && -x /usr/sbin/dropbearkey ]]; then
+# Preferred: the feather `dropbear` package already installed it into the stage.
+# Then host/vendored runtime; building from source inline is the last resort.
+if [[ -x "$STAGE_DIR/usr/sbin/dropbear" && -x "$STAGE_DIR/usr/sbin/dropbearkey" ]]; then
+  dropbear_ok=1   # provided by the feather dropbear package
+elif [[ -x /usr/sbin/dropbear && -x /usr/sbin/dropbearkey ]]; then
   cp -a /usr/sbin/dropbear "$STAGE_DIR/usr/sbin/dropbear"
   cp -a /usr/sbin/dropbearkey "$STAGE_DIR/usr/sbin/dropbearkey"
   [[ -x /usr/bin/dbclient ]] && cp -a /usr/bin/dbclient "$STAGE_DIR/usr/bin/dbclient"
@@ -248,14 +269,16 @@ if [[ "${USE_FB_REFRESHER:-0}" == "1" && "${IS_MSM_FB_REFRESHER:-0}" == "1" ]]; 
   overlay_fb_helpers+=(msm-fb-refresher)
 fi
 for f in "${overlay_fb_helpers[@]}"; do
-  if [[ -x "$VENDOR_RUNTIME/usr/bin/$f" ]]; then
+  # peacock-splash comes from its feather package; scavenge only as fallback.
+  if [[ ! -x "$STAGE_DIR/usr/bin/$f" && -x "$VENDOR_RUNTIME/usr/bin/$f" ]]; then
     cp -a "$VENDOR_RUNTIME/usr/bin/$f" "$STAGE_DIR/usr/bin/$f"
     chmod +x "$STAGE_DIR/usr/bin/$f"
   fi
 done
 
-# Keep full fdisk stack on PRP_ROOTFS (overlay) for maintenance/debug sessions.
-if [[ -x "$VENDOR_RUNTIME/sbin/fdisk" ]]; then
+# Full fdisk comes from the feather util-linux package. Scavenge the vendored
+# fdisk stack only if feather didn't place one at /sbin/fdisk.
+if [[ ! -x "$STAGE_DIR/sbin/fdisk" && -x "$VENDOR_RUNTIME/sbin/fdisk" ]]; then
   cp -a "$VENDOR_RUNTIME/sbin/fdisk" "$STAGE_DIR/sbin/fdisk"
   chmod +x "$STAGE_DIR/sbin/fdisk"
   shopt -s nullglob
@@ -281,17 +304,19 @@ if [[ -x "$VENDOR_RUNTIME/sbin/fdisk" ]]; then
   shopt -u nullglob
 fi
 
-# GUI binary — this IS the recovery UI. REQUIRED: an overlay without prp-gui is
-# useless for recovery, so fail loudly rather than silently shipping a GUI-less
-# rootfs. (Contrast dropbear above, where ssh is a genuine convenience.)
-if ! "$SCRIPT_DIR/build-gui.sh" "$CFG" "$OUT_DIR"; then
-  die "prp-gui build failed (see above) — refusing to ship a GUI-less overlay. \
-Common cause: no DNS in the build chroot (curl 'Could not resolve host') so the \
-LVGL source can't be fetched; ensure the chroot has a working /etc/resolv.conf."
+# GUI binary — this IS the recovery UI, and the feather prp-gui package should
+# have installed it into the stage. Fall back to a direct build if somehow absent;
+# a GUI-less overlay is useless for recovery, so still fail loudly in that case.
+if [[ ! -x "$STAGE_DIR/usr/bin/prp-gui" ]]; then
+  if ! "$SCRIPT_DIR/build-gui.sh" "$CFG" "$OUT_DIR"; then
+    die "prp-gui not provided by feather and direct build failed — refusing to \
+ship a GUI-less overlay. Common cause: no DNS in the build chroot (curl 'Could \
+not resolve host') so the LVGL source can't be fetched."
+  fi
+  GUI_BIN="$OUT_DIR/tools/gui-out/${TARGET_ARCH}/prp-gui"
+  [[ -f "$GUI_BIN" ]] || die "prp-gui build reported success but $GUI_BIN is missing"
+  cp -a "$GUI_BIN" "$STAGE_DIR/usr/bin/prp-gui"
 fi
-GUI_BIN="$OUT_DIR/tools/gui-out/${TARGET_ARCH}/prp-gui"
-[[ -f "$GUI_BIN" ]] || die "prp-gui build reported success but $GUI_BIN is missing"
-cp -a "$GUI_BIN" "$STAGE_DIR/usr/bin/prp-gui"
 chmod +x "$STAGE_DIR/usr/bin/prp-gui"
 
 # Best-effort: bake host public keys into overlay for key-based login.
@@ -336,6 +361,21 @@ export PRP_RECOVERY_SESSION=1
 exec /usr/lib/prp/prp-init "$@"
 EOF
 chmod +x "$STAGE_DIR/usr/bin/prp-recovery-enter"
+
+# Trim non-runtime bloat from the feather-installed tree. A recovery rootfs
+# doesn't need locales/man/docs/headers/static archives — dropping them keeps
+# PRP_ROOTFS small without re-introducing binary scavenging (every binary + its
+# shared libs stay intact). Ports should ideally strip these in package().
+rm -rf \
+  "$STAGE_DIR"/usr/share/locale "$STAGE_DIR"/usr/share/man \
+  "$STAGE_DIR"/usr/share/doc "$STAGE_DIR"/usr/share/info \
+  "$STAGE_DIR"/usr/share/gtk-doc "$STAGE_DIR"/usr/share/bash-completion \
+  "$STAGE_DIR"/usr/include "$STAGE_DIR"/include 2>/dev/null || true
+# *.static are util-linux's statically-linked tool duplicates — needed by the
+# lean initramfs (no shared libs), but redundant on the overlay where the
+# dynamic versions + their libs are present.
+find "$STAGE_DIR" \( -name '*.a' -o -name '*.mo' -o -name '*.la' -o -name '*.static' \) -delete 2>/dev/null || true
+echo "overlay: staged rootfs size after trim: $(du -sh "$STAGE_DIR" | awk '{print $1}')"
 
 # Create ext4 image populated from a tarball so we can force numeric root ownership without sudo.
 if [[ "$PRP_OVERLAY_STAGE_ONLY" == "1" ]]; then

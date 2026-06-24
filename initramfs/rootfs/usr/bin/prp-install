@@ -1,0 +1,174 @@
+#!/bin/sh
+# prp-install — on-device PeacockOS installer (the real backend behind the GUI
+# wizard). Installs straight to the target partition: format -> feather-install
+# the chosen package set from the mirror -> bootloader -> user/init config. NO
+# disk image is produced; packages are fetched prebuilt + signed from genmirror.
+#
+# It speaks a line protocol on stdout that the GUI parses (one token per line):
+#   STEP <i> <total> <title>     a new phase started
+#   PROGRESS <0-100>             overall percent
+#   LOG <text>                   a detail line for the log view
+#   DONE                         success
+#   ERROR <text>                 fatal failure (installer stops)
+#
+# Choices come from flags (mirroring the desktop builder):
+#   --flavor --init --desktop --dm --user --pass --host --disk
+#   --dry-run   simulate every step (no formatting/installing) — used by the sim
+#               and for a safe "what will happen" run.
+#
+# Real destructive steps are guarded: missing mirror / target / tools -> ERROR
+# with an actionable message rather than a half-install.
+
+set -u
+
+FLAVOR=arch INIT=openrc DESKTOP=none DM=none USER_NAME="" USER_PASS="" HOSTNAME=peacock DISK="" DRYRUN=0
+TARGET_MNT=/mnt/peacock-target
+ARCH="$(uname -m 2>/dev/null || echo aarch64)"
+case "$ARCH" in arm64) ARCH=aarch64 ;; esac
+
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--flavor)  FLAVOR="$2"; shift 2 ;;
+		--init)    INIT="$2"; shift 2 ;;
+		--desktop) DESKTOP="$2"; shift 2 ;;
+		--dm)      DM="$2"; shift 2 ;;
+		--user)    USER_NAME="$2"; shift 2 ;;
+		--pass)    USER_PASS="$2"; shift 2 ;;
+		--host)    HOSTNAME="$2"; shift 2 ;;
+		--disk)    DISK="$2"; shift 2 ;;
+		--arch)    ARCH="$2"; shift 2 ;;
+		--dry-run) DRYRUN=1; shift ;;
+		*) shift ;;
+	esac
+done
+
+TOTAL=6
+step()     { printf 'STEP %s %s %s\n' "$1" "$TOTAL" "$2"; }
+progress() { printf 'PROGRESS %s\n' "$1"; }
+log()      { printf 'LOG %s\n' "$*"; }
+done_ok()  { printf 'DONE\n'; exit 0; }
+fail()     { printf 'ERROR %s\n' "$*"; exit 1; }
+
+# Normalize a desktop/dm/flavor choice to a package suffix (lowercase, spaces->-).
+slug() { printf '%s' "$1" | tr 'A-Z ' 'a-z-'; }
+
+sim() { [ "$DRYRUN" = "1" ]; }
+run() { if sim; then log "(dry-run) $*"; else "$@"; fi; }
+
+# ---- the metapackage set implied by the choices -------------------------------
+# These resolve on genmirror; feather pulls their dependency closure. Names are
+# the contract with the build/publish side (peacock-base + per-device + flavor +
+# desktop + login-manager metapackages).
+build_pkg_set() {
+	set -- peacock-base
+	[ -n "${DEVICE_CODENAME:-}" ] && set -- "$@" "device-${DEVICE_CODENAME}"
+	set -- "$@" "flavor-$(slug "$FLAVOR")" "init-$(slug "$INIT")"
+	[ "$(slug "$DESKTOP")" != "none" ] && set -- "$@" "desktop-$(slug "$DESKTOP")"
+	[ "$(slug "$DM")" != "none" ] && set -- "$@" "dm-$(slug "$DM")"
+	echo "$@"
+}
+
+# ---- 1. network ---------------------------------------------------------------
+step 1 "Checking network"
+progress 2
+if sim; then
+	log "network OK (simulated)"
+elif command -v prp-net >/dev/null 2>&1; then
+	st="$(prp-net status 2>/dev/null || echo disconnected)"
+	case "$st" in
+		disconnected|"") fail "No network. Connect to Wi-Fi first, then retry." ;;
+		*) log "online: $st" ;;
+	esac
+else
+	log "prp-net not present; assuming an existing connection"
+fi
+progress 8
+
+# ---- 2. resolve packages (BEFORE formatting, so a bad mirror can't leave a
+#         wiped target) ----------------------------------------------------------
+step 2 "Resolving packages"
+PKGS="$(build_pkg_set)"
+log "package set: $PKGS"
+if sim; then
+	progress 16
+else
+	command -v ftr >/dev/null 2>&1 || fail "feather (ftr) missing in PRP."
+	log "syncing repository index"
+	ftr sync || fail "ftr sync failed — is genmirror reachable + configured in feather.conf?"
+	progress 18
+fi
+
+# ---- 3. prepare target (destructive — only after the mirror checks out) -------
+step 3 "Preparing the target partition"
+if sim; then
+	log "would format $DISK and mount at $TARGET_MNT"
+	progress 28
+else
+	[ -n "$DISK" ] || fail "No target disk selected."
+	# DISK may be a friendly label from the GUI; resolve to a block device.
+	TARGET_DEV="$DISK"
+	[ -b "$TARGET_DEV" ] || TARGET_DEV="$(blkid -L "$DISK" 2>/dev/null || true)"
+	[ -n "$TARGET_DEV" ] && [ -b "$TARGET_DEV" ] || fail "Target '$DISK' is not a block device."
+	command -v mkfs.ext4 >/dev/null 2>&1 || fail "mkfs.ext4 missing (e2fsprogs-prp not installed)."
+	log "formatting $TARGET_DEV as ext4"
+	mkfs.ext4 -F -L PEACOCK_ROOT "$TARGET_DEV" >/dev/null 2>&1 || fail "mkfs.ext4 failed on $TARGET_DEV"
+	mkdir -p "$TARGET_MNT"
+	mount "$TARGET_DEV" "$TARGET_MNT" || fail "could not mount $TARGET_DEV"
+	progress 30
+fi
+
+# ---- 4. install system --------------------------------------------------------
+step 4 "Installing the system"
+if sim; then
+	for p in $PKGS; do log "installing $p"; done
+	progress 70
+else
+	# Install into the mounted target; the layouts land under it.
+	export FTR_DB_ROOT="$TARGET_MNT/var/lib/feather"
+	# shellcheck disable=SC2086
+	ftr install --root "$TARGET_MNT" --arch "$ARCH" \
+		--peacock-prefix "$TARGET_MNT/peacock" \
+		--apps-prefix "$TARGET_MNT/apps" \
+		--compat-prefix "$TARGET_MNT/compat" \
+		$PKGS || fail "package install failed (see log)."
+	progress 70
+fi
+
+# ---- 5. bootloader ------------------------------------------------------------
+step 5 "Installing the bootloader"
+if sim; then
+	log "would install bootloader + boot image for ${DEVICE_CODENAME:-this device}"
+	progress 85
+else
+	if command -v prp-install-bootloader >/dev/null 2>&1; then
+		prp-install-bootloader "$TARGET_MNT" "$ARCH" || fail "bootloader install failed."
+	else
+		log "WARN: no device bootloader hook (prp-install-bootloader); skipping"
+	fi
+	progress 85
+fi
+
+# ---- 6. finalize: user + hostname + init --------------------------------------
+step 6 "Configuring user and services"
+if sim; then
+	log "would create user '$USER_NAME', hostname '$HOSTNAME', init=$INIT dm=$DM"
+	progress 98
+else
+	[ -n "$HOSTNAME" ] && echo "$HOSTNAME" > "$TARGET_MNT/etc/hostname" 2>/dev/null || true
+	if [ -n "$USER_NAME" ] && command -v chroot >/dev/null 2>&1; then
+		log "creating user $USER_NAME"
+		# Best-effort; the flavor's tools live in the target now.
+		chroot "$TARGET_MNT" useradd -m -G wheel "$USER_NAME" 2>/dev/null || \
+			log "WARN: useradd not available in target; user setup deferred to first boot"
+		if [ -n "$USER_PASS" ]; then
+			printf '%s:%s' "$USER_NAME" "$USER_PASS" | chroot "$TARGET_MNT" chpasswd 2>/dev/null || true
+		fi
+	fi
+	sync
+	umount "$TARGET_MNT" 2>/dev/null || true
+	progress 98
+fi
+
+progress 100
+log "Installation complete."
+done_ok

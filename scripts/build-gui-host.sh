@@ -65,6 +65,14 @@ fi
 OUT_BIN="$OUT_BIN_DIR/prp-gui-host"
 if [[ -f "$OUT_BIN" \
   && "$OUT_BIN" -nt "$PRP_ROOT/gui/prp_gui_sdl.c" \
+  && "$OUT_BIN" -nt "$PRP_ROOT/gui/prp_ui.c" \
+  && "$OUT_BIN" -nt "$PRP_ROOT/gui/prp_ui.h" \
+  && "$OUT_BIN" -nt "$PRP_ROOT/gui/prp_wizard.c" \
+  && "$OUT_BIN" -nt "$PRP_ROOT/gui/prp_wizard.h" \
+  && "$OUT_BIN" -nt "$PRP_ROOT/gui/prp_net_ui.c" \
+  && "$OUT_BIN" -nt "$PRP_ROOT/gui/prp_net_ui.h" \
+  && "$OUT_BIN" -nt "$PRP_ROOT/gui/prp_theme.h" \
+  && "$OUT_BIN" -nt "$PRP_ROOT/gui/lv_conf.h" \
   && "$OUT_BIN" -nt "$PRP_ROOT/gui/prp_logo.c" \
   && "$OUT_BIN" -nt "$PRP_ROOT/gui/prp_logo.h" \
   && "$OUT_BIN" -nt "$PRP_ROOT/gui/lv_conf.h" \
@@ -120,6 +128,14 @@ SRCS=(
   "$LVD_DIR/sdl/sdl.c"
   "$LVD_DIR/sdl/sdl_common.c"
   "$PRP_ROOT/gui/prp_logo.c"
+  "$PRP_ROOT/gui/fonts/pk_serif_30.c"
+  "$PRP_ROOT/gui/fonts/pk_serif_44.c"
+  "$PRP_ROOT/gui/fonts/pk_mono_16.c"
+  "$PRP_ROOT/gui/fonts/pk_mono_20.c"
+  "$PRP_ROOT/gui/fonts/pk_mono_26.c"
+  "$PRP_ROOT/gui/prp_ui.c"
+  "$PRP_ROOT/gui/prp_wizard.c"
+  "$PRP_ROOT/gui/prp_net_ui.c"
   "$PRP_ROOT/gui/prp_gui_sdl.c"
 )
 
@@ -133,7 +149,7 @@ INCS=(
 SDL_CFLAGS="$(pkg-config --cflags sdl2)"
 SDL_LIBS="$(pkg-config --libs sdl2)"
 
-zig cc -O2 -std=c99 -D_GNU_SOURCE \
+zig cc ${HOST_GUI_OPT:--O2} -std=c99 -D_GNU_SOURCE \
   -DLV_CONF_INCLUDE_SIMPLE=1 \
   "${INCS[@]}" \
   $SDL_CFLAGS \
