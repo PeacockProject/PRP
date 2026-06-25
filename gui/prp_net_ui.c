@@ -28,7 +28,7 @@ LV_FONT_DECLARE(pk_mono_20);
 #define STATUS_FILE "/tmp/prp-net-status"
 
 static struct {
-    lv_obj_t *overlay, *ssid_dd, *psk_ta, *cc_ta, *status_lbl, *kb, *scan_btn_lbl;
+    lv_obj_t *overlay, *ssid_dd, *psk_ta, *cc_dd, *status_lbl, *kb, *scan_btn_lbl;
     int w, h, scale;
     const char *mock_ssids;
     const lv_font_t *f_title, *f_body, *f_small;
@@ -41,6 +41,25 @@ static struct {
     char status[128];
     char ssid_opts[2048];
 } N;
+
+/* Region selector options for the 5GHz/DFS country prompt. Index 0 is the
+ * "not picked" sentinel; every other entry begins with its ISO-3166 alpha-2
+ * code (first two chars), which is what we hand to `prp-net set-country`. */
+static const char COUNTRY_OPTS[] =
+    "Select your region\n"
+    "AR - Argentina\nAU - Australia\nAT - Austria\nBE - Belgium\nBR - Brazil\n"
+    "BG - Bulgaria\nCA - Canada\nCL - Chile\nCN - China\nCO - Colombia\n"
+    "HR - Croatia\nCZ - Czechia\nDK - Denmark\nEG - Egypt\nFI - Finland\n"
+    "FR - France\nDE - Germany\nGR - Greece\nHK - Hong Kong\nHU - Hungary\n"
+    "IN - India\nID - Indonesia\nIE - Ireland\nIL - Israel\nIT - Italy\n"
+    "JP - Japan\nKE - Kenya\nKR - Korea (South)\nMY - Malaysia\nMX - Mexico\n"
+    "MA - Morocco\nNL - Netherlands\nNZ - New Zealand\nNG - Nigeria\nNO - Norway\n"
+    "PK - Pakistan\nPE - Peru\nPH - Philippines\nPL - Poland\nPT - Portugal\n"
+    "QA - Qatar\nRO - Romania\nRU - Russia\nSA - Saudi Arabia\nRS - Serbia\n"
+    "SG - Singapore\nSK - Slovakia\nSI - Slovenia\nZA - South Africa\nES - Spain\n"
+    "SE - Sweden\nCH - Switzerland\nTW - Taiwan\nTH - Thailand\nTR - Turkiye\n"
+    "UA - Ukraine\nAE - United Arab Emirates\nGB - United Kingdom\n"
+    "US - United States\nVN - Vietnam";
 
 static int clampi(int v, int lo, int hi) { return v < lo ? lo : (v > hi ? hi : v); }
 
@@ -180,12 +199,12 @@ static void connect_poll(lv_timer_t *t) {
         } else if(strncmp(buf, "fail need-country", 17) == 0) {
             /* Associated, but a 5GHz/DFS channel needs a regulatory country to
              * transmit. Reveal the region field and ask — don't blame the pass. */
-            if(N.cc_ta) {
-                lv_obj_clear_flag(N.cc_ta, LV_OBJ_FLAG_HIDDEN);
-                lv_obj_scroll_to_view(N.cc_ta, LV_ANIM_OFF);
+            if(N.cc_dd) {
+                lv_obj_clear_flag(N.cc_dd, LV_OBJ_FLAG_HIDDEN);
+                lv_obj_scroll_to_view(N.cc_dd, LV_ANIM_OFF);
             }
-            set_status("This 5 GHz network needs your region — enter your 2-letter "
-                       "country code (e.g. US, DE, TR) above and reconnect.");
+            set_status("This 5 GHz network needs your region — pick your country "
+                       "above and reconnect.");
         } else {
             set_status("Couldn't connect — check the password");
         }
@@ -205,14 +224,16 @@ static void connect_btn_cb(lv_event_t *e) {
     if(!ssid[0] || ssid[0] == '(') { set_status("Scan + pick a network first"); return; }
     const char *psk = N.psk_ta ? lv_textarea_get_text(N.psk_ta) : "";
 
-    /* If the region field is showing and filled, persist the country first
-     * (fast, finishes before connect) so this attempt can use 5GHz/DFS. */
-    if(N.cc_ta && !lv_obj_has_flag(N.cc_ta, LV_OBJ_FLAG_HIDDEN) && prp_net_present()) {
-        const char *cc = lv_textarea_get_text(N.cc_ta);
-        if(cc && cc[0]) {
-            pid_t p = spawn_prpnet("set-country", cc, NULL);
-            if(p > 0) { int st; (void)waitpid(p, &st, 0); }
-        }
+    /* If the region selector is showing and a real region is picked (index 0 is
+     * the "Select your region" sentinel), persist the country first (fast,
+     * finishes before connect) so this attempt can use 5GHz/DFS. */
+    if(N.cc_dd && !lv_obj_has_flag(N.cc_dd, LV_OBJ_FLAG_HIDDEN) && prp_net_present()
+       && lv_dropdown_get_selected(N.cc_dd) > 0) {
+        char sel[64], cc[3];
+        lv_dropdown_get_selected_str(N.cc_dd, sel, sizeof(sel));
+        cc[0] = sel[0]; cc[1] = sel[1]; cc[2] = '\0';
+        pid_t p = spawn_prpnet("set-country", cc, NULL);
+        if(p > 0) { int st; (void)waitpid(p, &st, 0); }
     }
 
     if(!prp_net_present()) {
@@ -234,7 +255,7 @@ static void net_close(void) {
     if(N.scan_timer) { lv_timer_del(N.scan_timer); N.scan_timer = NULL; }
     if(N.connect_timer) { lv_timer_del(N.connect_timer); N.connect_timer = NULL; }
     if(N.overlay) { lv_obj_del(N.overlay); N.overlay = NULL; }
-    N.ssid_dd = N.psk_ta = N.cc_ta = N.status_lbl = N.kb = NULL;
+    N.ssid_dd = N.psk_ta = N.cc_dd = N.status_lbl = N.kb = NULL;
 }
 static void back_cb(lv_event_t *e) { (void)e; net_close(); }
 
@@ -308,19 +329,15 @@ void prp_net_ui_show(int screen_w, int screen_h, int scale_pct, const char *mock
     lv_obj_add_event_cb(N.psk_ta, ta_event_cb, LV_EVENT_FOCUSED, NULL);
     lv_obj_add_event_cb(N.psk_ta, ta_event_cb, LV_EVENT_DEFOCUSED, NULL);
 
-    /* Region/country field (ISO-3166 alpha-2). Hidden until a connect reports
-     * need-country — 5GHz/DFS channels can't transmit without a regulatory
-     * domain, so the radio associates but DHCP never completes. Then we reveal
-     * this and ask, instead of mislabelling it a bad password. */
-    N.cc_ta = lv_textarea_create(N.overlay);
-    lv_textarea_set_one_line(N.cc_ta, true);
-    lv_textarea_set_max_length(N.cc_ta, 2);
-    lv_textarea_set_placeholder_text(N.cc_ta, "Region code (e.g. US) — needed for 5 GHz");
-    lv_obj_set_width(N.cc_ta, lv_pct(100));
-    lv_obj_set_style_text_font(N.cc_ta, N.f_body, 0);
-    lv_obj_add_event_cb(N.cc_ta, ta_event_cb, LV_EVENT_FOCUSED, NULL);
-    lv_obj_add_event_cb(N.cc_ta, ta_event_cb, LV_EVENT_DEFOCUSED, NULL);
-    lv_obj_add_flag(N.cc_ta, LV_OBJ_FLAG_HIDDEN);
+    /* Region selector. Hidden until a connect reports need-country — 5GHz/DFS
+     * channels can't transmit without a regulatory domain, so the radio
+     * associates but DHCP never completes. Then we reveal this and ask for the
+     * region, instead of mislabelling it a bad password. */
+    N.cc_dd = lv_dropdown_create(N.overlay);
+    lv_dropdown_set_options(N.cc_dd, COUNTRY_OPTS);
+    lv_obj_set_width(N.cc_dd, lv_pct(100));
+    lv_obj_set_style_text_font(N.cc_dd, N.f_body, 0);
+    lv_obj_add_flag(N.cc_dd, LV_OBJ_FLAG_HIDDEN);
 
     lv_obj_t *conn_btn = lv_btn_create(N.overlay);
     lv_obj_set_width(conn_btn, lv_pct(100));
