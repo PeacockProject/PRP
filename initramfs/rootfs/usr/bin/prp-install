@@ -293,6 +293,20 @@ else
 	mkdir -p "$FTR_DB_ROOT"
 	ftr sync || fail "ftr sync into target db failed."
 
+	# Resolve the active-slot boot partition so the bootloader package's
+	# post-install hook (lk2nd / minkernel, pulled in by device-<codename>)
+	# flashes itself there. Empty -> the hook no-ops (image staged, nothing
+	# flashed) — so a missing/odd partition table can never brick the device here.
+	if command -v prp-boot-target >/dev/null 2>&1; then
+		PEACOCK_BOOT_DEV="$(prp-boot-target 2>/dev/null || true)"
+		if [ -n "$PEACOCK_BOOT_DEV" ]; then
+			export PEACOCK_BOOT_DEV
+			log "bootloader flash target: $PEACOCK_BOOT_DEV"
+		else
+			log "WARN: no bootloader flash target resolved; bootloader will not be flashed"
+		fi
+	fi
+
 	# 4a. Peacock base at the target root. The /peacock /apps /compat layouts land
 	#     under it.
 	log "installing Peacock base into /"

@@ -1,0 +1,58 @@
+#!/bin/sh
+# prp-boot-target — resolve the block device the bootloader (lk2nd / minkernel)
+# should be flashed to, and print it. Consumed by prp-install, which exports it
+# as PEACOCK_BOOT_DEV so the lk2nd/minkernel package post-install hooks flash
+# themselves to the right place (they no-op when it's unset).
+#
+# A/B aware: reads the active slot from the Android bootloader_control struct in
+# the `misc` partition (slot_suffix @ off 2048, magic 0x42414342 @ off 2052) and
+# targets boot_<slot>; falls back to a plain `boot` partition on non-A/B devices.
+# PRP has no by-name symlinks, so partitions are resolved by GPT name via the
+# real util-linux sfdisk (busybox's is a broken shim).
+set -u
+
+DISK="${PRP_BOOT_DISK:-/dev/mmcblk0}"
+
+find_sfdisk() {
+	for c in /sbin/sfdisk /usr/sbin/sfdisk /bin/sfdisk \
+		/mnt/prp_rootfs/sbin/sfdisk /mnt/prp_rootfs/usr/sbin/sfdisk; do
+		[ -x "$c" ] || continue
+		case "$(readlink -f "$c" 2>/dev/null)" in *busybox*) continue ;; esac
+		echo "$c"; return 0
+	done
+	return 1
+}
+SFDISK="$(find_sfdisk || true)"
+[ -n "$SFDISK" ] || exit 1
+[ -b "$DISK" ] || exit 1
+
+# gpt_dev <gpt-name> -> /dev path of the partition with that exact GPT name.
+gpt_dev() {
+	"$SFDISK" -d "$DISK" 2>/dev/null | while IFS= read -r line; do
+		nm="$(printf '%s' "$line" | sed -n 's/.*name="\([^"]*\)".*/\1/p')"
+		[ "$nm" = "$1" ] || continue
+		printf '%s\n' "${line%% *}"
+		break
+	done
+}
+
+# active A/B slot suffix ("_a"/"_b"), or empty (non-A/B / unreadable).
+active_slot() {
+	misc="$(gpt_dev misc)"
+	[ -n "$misc" ] && [ -b "$misc" ] || return 0
+	magic="$(dd if="$misc" bs=1 skip=2052 count=4 2>/dev/null | busybox hexdump -v -e '1/1 "%02x"' 2>/dev/null)"
+	[ "$magic" = "42434142" ] || return 0   # bootloader_control magic (LE)
+	suf="$(dd if="$misc" bs=1 skip=2048 count=4 2>/dev/null | tr -d '\000')"
+	case "$suf" in _a|_b) printf '%s' "$suf" ;; esac
+}
+
+slot="$(active_slot)"
+for name in "boot${slot}" boot boot_a; do
+	[ -n "$name" ] || continue
+	dev="$(gpt_dev "$name")"
+	if [ -n "$dev" ] && [ -b "$dev" ]; then
+		printf '%s\n' "$dev"
+		exit 0
+	fi
+done
+exit 1
