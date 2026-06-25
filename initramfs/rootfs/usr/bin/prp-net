@@ -172,7 +172,33 @@ cmd_connect() {
 	if [ -n "$ip" ]; then
 		echo "ok $ip" >"$STATUS_OUT"; log "connected $ip"; return 0
 	fi
+	# Associated but no DHCP lease. On a 5GHz channel with no regulatory country
+	# this is the DFS trap: DFS channels are no-TX until a country is set, so the
+	# radio associates but can't send DHCP. Signal the GUI (distinct status +
+	# rc 2) to prompt the user for their region, set it (prp-net set-country),
+	# and retry — instead of mislabelling it a bad password.
+	freq=$(wpa_cli -i "$iface" status 2>/dev/null | sed -n 's/^freq=//p')
+	if [ -z "$WIFI_COUNTRY" ] && [ "${freq:-0}" -ge 5000 ] 2>/dev/null; then
+		echo "fail need-country" >"$STATUS_OUT"; log "dhcp failed on 5GHz, no regulatory country set — need-country"; return 2
+	fi
 	echo "fail dhcp" >"$STATUS_OUT"; log "dhcp failed"; return 1
+}
+
+# Persist the regulatory country the GUI collected (ISO-3166 alpha-2), so the
+# next connect can use 5GHz/DFS. Applies it live too if a supplicant is up.
+cmd_set_country() {
+	cc="$1"
+	case "$cc" in
+		[A-Za-z][A-Za-z]) ;;
+		*) log "invalid country code: $cc"; return 2 ;;
+	esac
+	cc=$(printf '%s' "$cc" | tr 'a-z' 'A-Z')
+	mkdir -p /etc/prp
+	printf '%s\n' "$cc" >/etc/prp/wifi-country
+	WIFI_COUNTRY="$cc"
+	iface=$(detect_iface 2>/dev/null) && wpa_cli -i "$iface" set country "$cc" >/dev/null 2>&1
+	log "regulatory country set to $cc"
+	echo "$cc"
 }
 
 cmd_status() {
@@ -187,8 +213,9 @@ cmd_status() {
 }
 
 case "${1:-}" in
-	scan)    cmd_scan ;;
-	connect) shift; [ $# -ge 1 ] || { log "connect needs <ssid>"; exit 2; }; cmd_connect "$@" ;;
-	status)  cmd_status ;;
-	*)       echo "usage: prp-net scan | connect <ssid> [psk] | status" >&2; exit 2 ;;
+	scan)        cmd_scan ;;
+	connect)     shift; [ $# -ge 1 ] || { log "connect needs <ssid>"; exit 2; }; cmd_connect "$@" ;;
+	status)      cmd_status ;;
+	set-country) shift; [ $# -ge 1 ] || { log "set-country needs <CC>"; exit 2; }; cmd_set_country "$1" ;;
+	*)           echo "usage: prp-net scan | connect <ssid> [psk] | status | set-country <CC>" >&2; exit 2 ;;
 esac

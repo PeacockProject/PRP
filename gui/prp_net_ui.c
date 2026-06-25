@@ -28,7 +28,7 @@ LV_FONT_DECLARE(pk_mono_20);
 #define STATUS_FILE "/tmp/prp-net-status"
 
 static struct {
-    lv_obj_t *overlay, *ssid_dd, *psk_ta, *status_lbl, *kb, *scan_btn_lbl;
+    lv_obj_t *overlay, *ssid_dd, *psk_ta, *cc_ta, *status_lbl, *kb, *scan_btn_lbl;
     int w, h, scale;
     const char *mock_ssids;
     const lv_font_t *f_title, *f_body, *f_small;
@@ -177,6 +177,15 @@ static void connect_poll(lv_timer_t *t) {
             char *nl = strchr(ip, '\n'); if(nl) *nl = '\0';
             N.connected = 1;
             set_status("Connected · %s", ip[0] ? ip : "online");
+        } else if(strncmp(buf, "fail need-country", 17) == 0) {
+            /* Associated, but a 5GHz/DFS channel needs a regulatory country to
+             * transmit. Reveal the region field and ask — don't blame the pass. */
+            if(N.cc_ta) {
+                lv_obj_clear_flag(N.cc_ta, LV_OBJ_FLAG_HIDDEN);
+                lv_obj_scroll_to_view(N.cc_ta, LV_ANIM_OFF);
+            }
+            set_status("This 5 GHz network needs your region — enter your 2-letter "
+                       "country code (e.g. US, DE, TR) above and reconnect.");
         } else {
             set_status("Couldn't connect — check the password");
         }
@@ -195,6 +204,16 @@ static void connect_btn_cb(lv_event_t *e) {
     lv_dropdown_get_selected_str(N.ssid_dd, ssid, sizeof(ssid));
     if(!ssid[0] || ssid[0] == '(') { set_status("Scan + pick a network first"); return; }
     const char *psk = N.psk_ta ? lv_textarea_get_text(N.psk_ta) : "";
+
+    /* If the region field is showing and filled, persist the country first
+     * (fast, finishes before connect) so this attempt can use 5GHz/DFS. */
+    if(N.cc_ta && !lv_obj_has_flag(N.cc_ta, LV_OBJ_FLAG_HIDDEN) && prp_net_present()) {
+        const char *cc = lv_textarea_get_text(N.cc_ta);
+        if(cc && cc[0]) {
+            pid_t p = spawn_prpnet("set-country", cc, NULL);
+            if(p > 0) { int st; (void)waitpid(p, &st, 0); }
+        }
+    }
 
     if(!prp_net_present()) {
         N.connected = 1;
@@ -215,7 +234,7 @@ static void net_close(void) {
     if(N.scan_timer) { lv_timer_del(N.scan_timer); N.scan_timer = NULL; }
     if(N.connect_timer) { lv_timer_del(N.connect_timer); N.connect_timer = NULL; }
     if(N.overlay) { lv_obj_del(N.overlay); N.overlay = NULL; }
-    N.ssid_dd = N.psk_ta = N.status_lbl = N.kb = NULL;
+    N.ssid_dd = N.psk_ta = N.cc_ta = N.status_lbl = N.kb = NULL;
 }
 static void back_cb(lv_event_t *e) { (void)e; net_close(); }
 
@@ -288,6 +307,20 @@ void prp_net_ui_show(int screen_w, int screen_h, int scale_pct, const char *mock
     lv_obj_set_style_text_font(N.psk_ta, N.f_body, 0);
     lv_obj_add_event_cb(N.psk_ta, ta_event_cb, LV_EVENT_FOCUSED, NULL);
     lv_obj_add_event_cb(N.psk_ta, ta_event_cb, LV_EVENT_DEFOCUSED, NULL);
+
+    /* Region/country field (ISO-3166 alpha-2). Hidden until a connect reports
+     * need-country — 5GHz/DFS channels can't transmit without a regulatory
+     * domain, so the radio associates but DHCP never completes. Then we reveal
+     * this and ask, instead of mislabelling it a bad password. */
+    N.cc_ta = lv_textarea_create(N.overlay);
+    lv_textarea_set_one_line(N.cc_ta, true);
+    lv_textarea_set_max_length(N.cc_ta, 2);
+    lv_textarea_set_placeholder_text(N.cc_ta, "Region code (e.g. US) — needed for 5 GHz");
+    lv_obj_set_width(N.cc_ta, lv_pct(100));
+    lv_obj_set_style_text_font(N.cc_ta, N.f_body, 0);
+    lv_obj_add_event_cb(N.cc_ta, ta_event_cb, LV_EVENT_FOCUSED, NULL);
+    lv_obj_add_event_cb(N.cc_ta, ta_event_cb, LV_EVENT_DEFOCUSED, NULL);
+    lv_obj_add_flag(N.cc_ta, LV_OBJ_FLAG_HIDDEN);
 
     lv_obj_t *conn_btn = lv_btn_create(N.overlay);
     lv_obj_set_width(conn_btn, lv_pct(100));
