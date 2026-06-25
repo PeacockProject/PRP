@@ -94,6 +94,20 @@ load_config() {
   START_TTY_SHELLS="${START_TTY_SHELLS:-1}"
   TEXT_CONSOLE_LOG="${TEXT_CONSOLE_LOG:-1}"
   SMOKE_ONLY="${SMOKE_ONLY:-0}"
+
+  # genmirror: the on-device feather repo the installer (prp-install) pulls from.
+  # Config entries, not hardcoded — override per-device .env or via env. The
+  # on-device feather.conf is templated from these at rootfs-assembly time.
+  GENMIRROR_URL="${GENMIRROR_URL:-https://genmirror.peacockos.org}"
+  GENMIRROR_CHANNEL="${GENMIRROR_CHANNEL:-stable}"
+  GENMIRROR_REPO_NAME="${GENMIRROR_REPO_NAME:-peacock-stable}"
+  # On-device path to the shipped genmirror trust anchor (public key).
+  GENMIRROR_PUBKEY="${GENMIRROR_PUBKEY:-/etc/feather/genmirror.pub}"
+
+  # PRP GUI DPI scale: the UI renders at native/factor and upscales factor× so it
+  # is readable + smooth on high-DPI panels. 100 = native; 200 = 2x (e.g. daisy's
+  # 1080x2280). Overridable per-device .env.
+  GUI_SCALE="${GUI_SCALE:-100}"
 }
 
 # Substitute the @PRP_*@ template tokens in a copy of /init. Single-sourced so

@@ -51,9 +51,11 @@ done
 # lean static-musl subset (fdisk/sfdisk/blkid/partx/losetup) — self-contained, so
 # PRP needs no glibc/ncurses/readline. wpa_supplicant + e2fsprogs land later;
 # absent ports are skipped with a warn.
-SHARED_PORTS=(busybox dropbear util-linux-prp e2fsprogs-prp peacock-splash wpa_supplicant)
-# The dep list baked into the prp-base metapackage (names only).
-PRP_BASE_DEPS=(busybox dropbear util-linux-prp e2fsprogs-prp wpa_supplicant peacock-splash prp-gui prp-runtime)
+SHARED_PORTS=(busybox dropbear util-linux-prp e2fsprogs-prp peacock-splash wpa_supplicant peacock-mkinitfs peacock-init-wrapper mkbootimg)
+# The dep list baked into the prp-base metapackage (names only). `feather` ships
+# ftr itself so the on-device installer (prp-install) can sync + install + manage
+# the keyring — without it the installer has no package manager.
+PRP_BASE_DEPS=(busybox dropbear util-linux-prp e2fsprogs-prp wpa_supplicant peacock-splash feather peacock-mkinitfs peacock-init-wrapper mkbootimg prp-gui prp-runtime)
 
 WORK="$OUT_DIR/feather-assembly"
 REPO="$WORK/repo"; STAGE="$WORK/stage"; KEYS="$WORK/keys"
@@ -75,6 +77,36 @@ for p in "${SHARED_PORTS[@]}"; do
   f=$(ls -1 "$PKG_STORE/$p-"*"-$ARCH.feather" 2>/dev/null | head -1 || true)
   [[ -n "$f" ]] && cp "$f" "$REPO/" || echo "assemble: WARN no built feather for '$p'" >&2
 done
+
+# `feather` (ftr) is packed ad-hoc, not a peacock port: cross-build + pack it here
+# if it isn't already in the store, then collect it. Ships ftr + the trust keyring
+# into PRP so prp-install can run the package manager on-device.
+echo "assemble: ensuring feather (ftr) package for $ARCH …"
+feather_pkg=$(ls -1 "$PKG_STORE/feather-"*"-$ARCH.feather" 2>/dev/null | head -1 || true)
+if [[ -z "$feather_pkg" ]]; then
+  case "$ARCH" in
+    aarch64) ZT="aarch64-linux-musl" ;;
+    armv7|armv7h|armhf) ZT="arm-linux-musleabihf" ;;
+    *) ZT="$ARCH-linux-musl" ;;
+  esac
+  echo "assemble: cross-building ftr ($ZT) …"
+  ( cd "$FEATHER_DIR" \
+    && ZIG_GLOBAL_CACHE_DIR=/tmp/zig-cache ZIG_LOCAL_CACHE_DIR=/tmp/zig-cache \
+       make clean >/dev/null 2>&1 \
+    && ZIG_GLOBAL_CACHE_DIR=/tmp/zig-cache ZIG_LOCAL_CACHE_DIR=/tmp/zig-cache \
+       make build CC="zig cc -target $ZT" >/dev/null 2>&1 )
+  fs=$(mktemp -d); mkdir -p "$fs/files/usr/bin"
+  cp "$FEATHER_DIR/ftr" "$fs/files/usr/bin/ftr"
+  (strip "$fs/files/usr/bin/ftr" 2>/dev/null || llvm-strip "$fs/files/usr/bin/ftr" 2>/dev/null || true)
+  printf '[package]\nname = "feather"\nversion = "0.1.0"\ndescription = "feather (ftr) package manager + trust keyring."\n\n[install]\nlayout = "system"\n' >"$fs/manifest.toml"
+  mkdir -p "$PKG_STORE"
+  ( cd "$fs" && tar -czf "$PKG_STORE/feather-0.1.0-1-$ARCH.feather" --numeric-owner manifest.toml files )
+  rm -rf "$fs"
+  # restore the host ftr for the rest of this script's signing/index/install steps
+  ( cd "$FEATHER_DIR" && make clean >/dev/null 2>&1 && make build tools/ftr-sign tools/gen-keypair >/dev/null 2>&1 )
+  feather_pkg=$(ls -1 "$PKG_STORE/feather-"*"-$ARCH.feather" 2>/dev/null | head -1 || true)
+fi
+[[ -n "$feather_pkg" ]] && cp "$feather_pkg" "$REPO/" || echo "assemble: WARN feather (ftr) package missing" >&2
 
 echo "assemble: packing prp-gui …"
 "$SCRIPT_DIR/build-gui.sh" "$CFG" "$OUT_DIR"
@@ -110,6 +142,84 @@ export FTR_CONFIG="$WORK/feather.conf"
 printf '[[repos]]\nname = "prp"\nurl = "file://%s"\npubkey = "%s"\n' "$REPO" "$KEYS/k.pub" >"$WORK/feather.conf"
 "$FTR" sync
 "$FTR" install --root "$STAGE" --arch "$ARCH" prp-base
+
+# Kernel modules + firmware for on-device wifi (and other modular drivers). The
+# boot kernel ships NO modules — they live here on the rootfs and are modprobe'd
+# after it mounts (the boot part only boots into prp-rootfs). The PRP kernel's
+# modules ride in the linux-<dev>-prp feather under usr/lib/modules; firmware
+# (wcnss/prima + GPU) in firmware-<dev>.
+echo "assemble: staging kernel modules + firmware …"
+KMOD_FEATHER=$(ls -1 "$PKG_STORE/linux-${TARGET_NAME}-prp-"*"-$ARCH.feather" 2>/dev/null | head -1)
+if [[ -n "$KMOD_FEATHER" ]]; then
+  tar -xzf "$KMOD_FEATHER" -C "$STAGE" --strip-components=1 'files/usr/lib/modules' 2>/dev/null \
+    && echo "assemble: modules <- $(basename "$KMOD_FEATHER")" \
+    || echo "assemble: WARN no usr/lib/modules in $(basename "$KMOD_FEATHER")"
+else
+  echo "assemble: WARN no linux-${TARGET_NAME}-prp feather (no kernel modules)" >&2
+fi
+FW_FEATHER=$(ls -1 "$PKG_STORE/firmware-${TARGET_NAME}-"*"-$ARCH.feather" 2>/dev/null | head -1)
+if [[ -n "$FW_FEATHER" ]]; then
+  tar -xzf "$FW_FEATHER" -C "$STAGE" --strip-components=1 'files/lib/firmware' 2>/dev/null \
+    && echo "assemble: firmware <- $(basename "$FW_FEATHER")" \
+    || echo "assemble: WARN no lib/firmware in $(basename "$FW_FEATHER")"
+fi
+# Regenerate modules.dep so on-device modprobe can resolve the wifi stack.
+KVER=$(ls "$STAGE/usr/lib/modules/" 2>/dev/null | head -1)
+if [[ -n "$KVER" ]] && command -v depmod >/dev/null 2>&1; then
+  depmod -b "$STAGE" "$KVER" 2>/dev/null && echo "assemble: depmod $KVER" || true
+fi
+
+# On-device feather.conf: point the installer's `ftr` at genmirror. Templated
+# from the GENMIRROR_* config entries (overridable per-device/env) so the
+# address is never hardcoded here. The trust anchor (genmirror.pub) ships in the
+# prp-runtime tree and is now installed at $STAGE$GENMIRROR_PUBKEY.
+echo "assemble: writing on-device genmirror feather.conf …"
+mkdir -p "$STAGE/etc/feather"
+if [[ ! -f "$STAGE$GENMIRROR_PUBKEY" ]]; then
+  echo "assemble: WARN genmirror trust anchor missing at $STAGE$GENMIRROR_PUBKEY" >&2
+fi
+printf '[[repos]]\nname = "%s"\nurl = "%s/%s/%s"\npubkey = "%s"\n' \
+  "$GENMIRROR_REPO_NAME" "$GENMIRROR_URL" "$GENMIRROR_CHANNEL" "$ARCH" "$GENMIRROR_PUBKEY" \
+  >"$STAGE/etc/feather/feather.conf"
+echo "assemble: feather.conf -> $GENMIRROR_URL/$GENMIRROR_CHANNEL/$ARCH"
+
+# On-device /etc/prp/device.conf: boot params for prp-install-bootloader,
+# templated from the device profile so the flasher isn't hardcoded.
+echo "assemble: writing on-device /etc/prp/device.conf (boot params) …"
+mkdir -p "$STAGE/etc/prp"
+_split="${FASTBOOT_AB_LK2ND_SPLIT_BOOT:-${IS_MSM_LK2ND_SPLIT_BOOT:-0}}"
+_slot="${FASTBOOT_SET_ACTIVE:-}"
+_bootpart="${FASTBOOT_BOOT_PARTITION:-boot}"
+if [[ -n "$_slot" ]]; then
+  _hint="/dev/block/bootdevice/by-name/${_bootpart}_${_slot} /dev/block/by-name/${_bootpart}_${_slot} /dev/block/bootdevice/by-name/${_bootpart} /dev/block/by-name/${_bootpart}"
+else
+  _hint="/dev/block/bootdevice/by-name/${_bootpart} /dev/block/by-name/${_bootpart}"
+fi
+{
+  printf '# Generated by assemble-rootfs-feather.sh from the %s device profile.\n' "$TARGET_NAME"
+  printf '# Consumed by prp-install-bootloader (on-device boot.img assembly + flash).\n'
+  printf 'DEVICE_CODENAME=%s\n' "$TARGET_NAME"
+  printf 'ROOT_LABEL=%s\n' "${ROOT_LABEL:-PEACOCK_ROOT}"
+  printf '\n# --- flash target (where the assembled boot.img is written) ---\n'
+  printf 'LK2ND_SPLIT_BOOT=%s\n' "$_split"
+  printf 'LK2ND_OFFSET=%s\n' "${LK2ND_OFFSET:-524288}"
+  printf 'BOOT_DEV_HINT="%s"\n' "$_hint"
+  printf '\n# --- mkbootimg params (installed-system boot.img assembly) ---\n'
+  printf 'KERNEL_BASE=%s\n' "${BASE:-0x80000000}"
+  printf 'KERNEL_OFFSET=%s\n' "${KERNEL_OFFSET:-0x00008000}"
+  printf 'RAMDISK_OFFSET=%s\n' "${RAMDISK_OFFSET:-0x01000000}"
+  printf 'SECOND_OFFSET=%s\n' "${SECOND_OFFSET:-0x00f00000}"
+  printf 'TAGS_OFFSET=%s\n' "${TAGS_OFFSET:-0x00000100}"
+  printf 'PAGESIZE=%s\n' "${PAGESIZE:-2048}"
+  printf 'HEADER_VERSION=%s\n' "${HEADER_VERSION:-0}"
+  printf 'BOARD_NAME="%s"\n' "${BOARD_NAME:-}"
+  printf 'BOOT_CMDLINE="%s"\n' "${CMDLINE:-}"
+} >"$STAGE/etc/prp/device.conf"
+echo "assemble: device.conf -> split=$_split slot=${_slot:-none} part=$_bootpart codename=$TARGET_NAME"
+
+# On-device prp-gui.conf: DPI scale for the panel (templated from GUI_SCALE).
+echo "assemble: writing on-device /etc/prp-gui.conf (scale=${GUI_SCALE:-100}) …"
+printf 'scale=%s\n' "${GUI_SCALE:-100}" >"$STAGE/etc/prp-gui.conf"
 
 echo "assemble: done. staged rootfs:"
 echo "$STAGE"

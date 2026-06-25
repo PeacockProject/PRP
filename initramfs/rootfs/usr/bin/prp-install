@@ -1,5 +1,5 @@
 #!/bin/sh
-# prp-install — on-device PeacockOS installer (the real backend behind the GUI
+# prp-install - on-device PeacockOS installer (the real backend behind the GUI
 # wizard). Installs straight to the target partition: format -> feather-install
 # the chosen package set from the mirror -> bootloader -> user/init config. NO
 # disk image is produced; packages are fetched prebuilt + signed from genmirror.
@@ -13,7 +13,7 @@
 #
 # Choices come from flags (mirroring the desktop builder):
 #   --flavor --init --desktop --dm --user --pass --host --disk
-#   --dry-run   simulate every step (no formatting/installing) — used by the sim
+#   --dry-run   simulate every step (no formatting/installing) - used by the sim
 #               and for a safe "what will happen" run.
 #
 # Real destructive steps are guarded: missing mirror / target / tools -> ERROR
@@ -42,6 +42,15 @@ while [ $# -gt 0 ]; do
 	esac
 done
 
+# Device profile (codename, boot.img geometry, flash target) is templated into
+# the overlay by assemble; this runs from the bootstrap /, so copy it there and
+# source it. DEVICE_CODENAME drives the device-<codename> package + bootloader.
+if [ ! -f /etc/prp/device.conf ] && [ -f /mnt/prp_rootfs/etc/prp/device.conf ]; then
+	mkdir -p /etc/prp
+	cp /mnt/prp_rootfs/etc/prp/device.conf /etc/prp/device.conf 2>/dev/null || true
+fi
+[ -f /etc/prp/device.conf ] && . /etc/prp/device.conf
+
 TOTAL=6
 step()     { printf 'STEP %s %s %s\n' "$1" "$TOTAL" "$2"; }
 progress() { printf 'PROGRESS %s\n' "$1"; }
@@ -55,17 +64,82 @@ slug() { printf '%s' "$1" | tr 'A-Z ' 'a-z-'; }
 sim() { [ "$DRYRUN" = "1" ]; }
 run() { if sim; then log "(dry-run) $*"; else "$@"; fi; }
 
-# ---- the metapackage set implied by the choices -------------------------------
-# These resolve on genmirror; feather pulls their dependency closure. Names are
-# the contract with the build/publish side (peacock-base + per-device + flavor +
-# desktop + login-manager metapackages).
-build_pkg_set() {
+# ---- the package sets implied by the choices ----------------------------------
+# Boot model (PeacockOS = base, distros = flavors on top): the Peacock BASE
+# installs at the target root (/); the chosen distro FLAVOR installs as a guest
+# under /flavors/<flavor>, entered by peacock-init at boot. All names resolve on
+# genmirror; feather pulls each dependency closure + GPG-verifies.
+#
+#   base_pkg_set    -> target /             peacock-base + device-<codename> + init-<init>
+#   flavor_base_pkg -> target /flavors/<f>  flavor-<flavor>-base (prebuilt distro rootfs)
+#
+# Desktop/login-manager live INSIDE the flavor and aren't feather-packaged yet,
+# so they're deferred (the flavor base brings a console system up first).
+base_pkg_set() {
 	set -- peacock-base
 	[ -n "${DEVICE_CODENAME:-}" ] && set -- "$@" "device-${DEVICE_CODENAME}"
-	set -- "$@" "flavor-$(slug "$FLAVOR")" "init-$(slug "$INIT")"
-	[ "$(slug "$DESKTOP")" != "none" ] && set -- "$@" "desktop-$(slug "$DESKTOP")"
-	[ "$(slug "$DM")" != "none" ] && set -- "$@" "dm-$(slug "$DM")"
+	set -- "$@" "init-$(slug "$INIT")"
 	echo "$@"
+}
+flavor_base_pkg() { echo "flavor-$(slug "$FLAVOR")-base"; }
+
+# Resolve a --disk selection (as listed by prp-targets) to a block device. The
+# selection's FIRST token is the value (rest is human display); it may be a
+# block-device path, an Android by-name label, or a filesystem label.
+resolve_target() {
+	tok="${1%% *}"
+	[ -b "$tok" ] && { echo "$tok"; return 0; }
+	for dir in /dev/block/bootdevice/by-name /dev/block/by-name /dev/block/platform/*/by-name; do
+		[ -e "$dir/$tok" ] || continue
+		r="$(readlink -f "$dir/$tok" 2>/dev/null)"
+		[ -b "$r" ] && { echo "$r"; return 0; }
+	done
+	r="$(blkid -L "$tok" 2>/dev/null || true)"
+	[ -b "$r" ] && { echo "$r"; return 0; }
+	return 1
+}
+
+# Bake the peacock guest-glue into a flavor root: a "flavor-ready" unit/service
+# that touches /peacock/.flavor-ready once the flavor finishes booting. The base
+# supervisor (peacock-init, PID 1) watches that file to tell "booted OK" from
+# "hung" (-> PRP recovery). Init-aware: systemd flavors (Arch/Debian) get a
+# oneshot unit; openrc flavors (Artix/Alpine) get an init.d service. Mirrors the
+# builder's rootfs.go peacock-flavor-ready so on-device installs + images match.
+# /peacock is bind-mounted into the flavor by peacock-init, so the path is live.
+apply_flavor_glue() {
+	froot="$1"
+	if [ -e "$froot/usr/lib/systemd/systemd" ]; then
+		log "flavor glue: systemd flavor-ready unit"
+		mkdir -p "$froot/etc/systemd/system/multi-user.target.wants"
+		cat > "$froot/etc/systemd/system/peacock-flavor-ready.service" <<'EOF'
+[Unit]
+Description=Signal the Peacock base that this flavor finished booting
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c ': > /peacock/.flavor-ready 2>/dev/null || true'
+
+[Install]
+WantedBy=multi-user.target
+EOF
+		ln -sf ../peacock-flavor-ready.service \
+			"$froot/etc/systemd/system/multi-user.target.wants/peacock-flavor-ready.service"
+	elif [ -e "$froot/sbin/openrc-run" ] || [ -e "$froot/usr/bin/openrc-run" ] || [ -e "$froot/sbin/openrc" ]; then
+		log "flavor glue: openrc flavor-ready service"
+		mkdir -p "$froot/etc/init.d" "$froot/etc/runlevels/default"
+		cat > "$froot/etc/init.d/peacock-flavor-ready" <<'EOF'
+#!/sbin/openrc-run
+description="Signal the Peacock base that this flavor finished booting"
+depend() { after *; }
+start() { : > /peacock/.flavor-ready 2>/dev/null || true; }
+EOF
+		chmod 755 "$froot/etc/init.d/peacock-flavor-ready"
+		ln -sf /etc/init.d/peacock-flavor-ready \
+			"$froot/etc/runlevels/default/peacock-flavor-ready"
+	else
+		log "WARN: flavor glue: no systemd/openrc detected in $froot; flavor-ready signal NOT installed (flavor may look 'hung' to the base)"
+	fi
 }
 
 # ---- 1. network ---------------------------------------------------------------
@@ -87,50 +161,181 @@ progress 8
 # ---- 2. resolve packages (BEFORE formatting, so a bad mirror can't leave a
 #         wiped target) ----------------------------------------------------------
 step 2 "Resolving packages"
-PKGS="$(build_pkg_set)"
-log "package set: $PKGS"
+BASE_PKGS="$(base_pkg_set)"
+FLAVOR_PKG="$(flavor_base_pkg)"
+log "base set (/): $BASE_PKGS"
+log "flavor (/flavors/$(slug "$FLAVOR")): $FLAVOR_PKG"
 if sim; then
 	progress 16
 else
 	command -v ftr >/dev/null 2>&1 || fail "feather (ftr) missing in PRP."
-	log "syncing repository index"
-	ftr sync || fail "ftr sync failed — is genmirror reachable + configured in feather.conf?"
+	# The genmirror feather.conf is templated into the overlay; ftr (run from the
+	# bootstrap /) reads /etc/feather/feather.conf, so make sure it's there (the
+	# trust anchor genmirror.pub already ships on /).
+	if [ ! -f /etc/feather/feather.conf ] && [ -f /mnt/prp_rootfs/etc/feather/feather.conf ]; then
+		mkdir -p /etc/feather
+		cp /mnt/prp_rootfs/etc/feather/feather.conf /etc/feather/feather.conf
+		[ -f /etc/feather/genmirror.pub ] || cp /mnt/prp_rootfs/etc/feather/genmirror.pub /etc/feather/genmirror.pub 2>/dev/null || true
+	fi
+	# ftr fetches via curl or wget; PRP ships the busybox wget applet but its
+	# curated install may not symlink it. Ensure a `wget` exists for ftr.
+	if ! command -v wget >/dev/null 2>&1 && ! command -v curl >/dev/null 2>&1; then
+		BB="$(command -v busybox 2>/dev/null || echo /usr/bin/busybox)"
+		[ -x "$BB" ] && ln -sf "$BB" /usr/bin/wget 2>/dev/null || true
+	fi
+	# Pre-flight sync to a scratch db: proves the mirror is reachable + verifies
+	# BEFORE we touch (format) the target. The real install re-syncs into the
+	# target-owned db so the installed system carries its own feather state.
+	PREFLIGHT_DB="${PRP_PREFLIGHT_DB:-/run/feather-preflight}"
+	rm -rf "$PREFLIGHT_DB"; mkdir -p "$PREFLIGHT_DB"
+	log "syncing repository index (pre-flight)"
+	FTR_DB_ROOT="$PREFLIGHT_DB" ftr sync || fail "ftr sync failed - is genmirror reachable + configured in feather.conf?"
 	progress 18
 fi
 
-# ---- 3. prepare target (destructive — only after the mirror checks out) -------
+# --- container partitioning (mirrors the builder's flashable disk image) -------
+# PRP installs the SAME layout the desktop builder's image has, but INSIDE the
+# chosen partition (a "container"): a nested GPT with peacock_boot (ext2 BOOT) +
+# peacock_root (ext4 ROOT). lk2nd boots peacock_boot's extlinux straight from the
+# container, so NOTHING outside it (boot_a / lk2nd) is touched. Offsets + labels
+# match image_chroot.go + subparts-mount.sh exactly.
+BOOT_START=2048          # 1MiB
+BOOT_SECTORS=1048576     # 512MiB -> root begins at 513MiB
+ROOT_START=1050624
+LOOP_DEV=""              # set when the container is attached; detached on cleanup
+
+# Find a REAL (non-busybox) util — busybox ships broken symlinks that shadow the
+# e2fsprogs / util-linux binaries.
+find_real() {
+	for c in "/sbin/$1" "/usr/sbin/$1" "/bin/$1" "/usr/bin/$1" \
+		"/mnt/prp_rootfs/sbin/$1" "/mnt/prp_rootfs/usr/sbin/$1"; do
+		[ -x "$c" ] || continue
+		case "$(readlink -f "$c" 2>/dev/null)" in *busybox*) continue ;; esac
+		echo "$c"; return 0
+	done
+	return 1
+}
+
+cleanup() {
+	umount "$TARGET_MNT/boot" 2>/dev/null || true
+	umount "$TARGET_MNT" 2>/dev/null || true
+	[ -n "$LOOP_DEV" ] && busybox losetup -d "$LOOP_DEV" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+# ---- 3. prepare target (destructive - only after the mirror checks out) -------
 step 3 "Preparing the target partition"
 if sim; then
-	log "would format $DISK and mount at $TARGET_MNT"
+	log "would write a nested GPT (peacock_boot + peacock_root) into $DISK"
 	progress 28
 else
 	[ -n "$DISK" ] || fail "No target disk selected."
-	# DISK may be a friendly label from the GUI; resolve to a block device.
-	TARGET_DEV="$DISK"
-	[ -b "$TARGET_DEV" ] || TARGET_DEV="$(blkid -L "$DISK" 2>/dev/null || true)"
-	[ -n "$TARGET_DEV" ] && [ -b "$TARGET_DEV" ] || fail "Target '$DISK' is not a block device."
-	command -v mkfs.ext4 >/dev/null 2>&1 || fail "mkfs.ext4 missing (e2fsprogs-prp not installed)."
-	log "formatting $TARGET_DEV as ext4"
-	mkfs.ext4 -F -L PEACOCK_ROOT "$TARGET_DEV" >/dev/null 2>&1 || fail "mkfs.ext4 failed on $TARGET_DEV"
+	# DISK is a prp-targets selection; first token is the container /dev path.
+	TARGET_DEV="$(resolve_target "$DISK")" || true
+	[ -n "$TARGET_DEV" ] && [ -b "$TARGET_DEV" ] || fail "Could not resolve target '$DISK' to a block device."
+	log "target container: $DISK -> $TARGET_DEV"
+	SFDISK="$(find_real sfdisk)" || fail "sfdisk missing (util-linux-prp not installed)."
+	MKE2FS="$(find_real mke2fs)" || fail "mke2fs missing (e2fsprogs-prp not installed)."
+
+	umount "$TARGET_DEV" 2>/dev/null || true
+	log "writing nested GPT (peacock_boot 512MiB + peacock_root) into $TARGET_DEV"
+	printf 'label: gpt\nstart=%s, size=%s, type=L, name="peacock_boot"\nstart=%s, type=L, name="peacock_root"\n' \
+		"$BOOT_START" "$BOOT_SECTORS" "$ROOT_START" \
+		| "$SFDISK" --label gpt "$TARGET_DEV" >/dev/null 2>&1 \
+		|| fail "writing nested GPT to $TARGET_DEV failed."
+
+	# Expose the nested partitions: losetup -P scans the container's GPT and gives
+	# loopXp1 (boot) + loopXp2 (root), correctly sized.
+	LOOP_DEV="$(busybox losetup -f)" || fail "no free loop device."
+	busybox losetup -P "$LOOP_DEV" "$TARGET_DEV" || fail "losetup -P on $TARGET_DEV failed."
+	BOOT_PART="${LOOP_DEV}p1"; ROOT_PART="${LOOP_DEV}p2"
+	i=0
+	while [ ! -b "$BOOT_PART" ] || [ ! -b "$ROOT_PART" ]; do
+		i=$((i + 1)); [ "$i" -gt 8 ] && fail "nested partitions did not appear ($BOOT_PART / $ROOT_PART)."
+		sleep 1
+	done
+
+	log "formatting peacock_boot (ext2 BOOT) + peacock_root (ext4 ROOT)"
+	"$MKE2FS" -F -q -t ext2 -L BOOT "$BOOT_PART" >/dev/null 2>&1 \
+		|| fail "mkfs ext2 (peacock_boot) failed."
+	"$MKE2FS" -F -q -t ext4 -O ^metadata_csum,^64bit,^orphan_file \
+		-E lazy_itable_init=0,lazy_journal_init=0 -L ROOT "$ROOT_PART" >/dev/null 2>&1 \
+		|| fail "mkfs ext4 (peacock_root) failed."
+
 	mkdir -p "$TARGET_MNT"
-	mount "$TARGET_DEV" "$TARGET_MNT" || fail "could not mount $TARGET_DEV"
+	mount "$ROOT_PART" "$TARGET_MNT" || fail "could not mount peacock_root."
+	mkdir -p "$TARGET_MNT/boot"
+	mount "$BOOT_PART" "$TARGET_MNT/boot" || fail "could not mount peacock_boot."
+	# Hand the resolved devices to the bootloader hook.
+	export PRP_BOOT_PART="$BOOT_PART" PRP_ROOT_PART="$ROOT_PART" PRP_CONTAINER="$TARGET_DEV"
 	progress 30
 fi
 
 # ---- 4. install system --------------------------------------------------------
+# Two roots: the Peacock base at /, the distro flavor under /flavors/<flavor>.
 step 4 "Installing the system"
+FLAVOR_SLUG="$(slug "$FLAVOR")"
+FLAVOR_ROOT="$TARGET_MNT/flavors/$FLAVOR_SLUG"
 if sim; then
-	for p in $PKGS; do log "installing $p"; done
+	log "base -> /"
+	for p in $BASE_PKGS; do log "installing $p"; done
+	log "flavor -> /flavors/$FLAVOR_SLUG"
+	log "installing $FLAVOR_PKG"
+	log "flavor glue: install peacock-flavor-ready signal (init-aware)"
+	log "assembling base: active-flavor=$FLAVOR_SLUG, /sbin/init, /peacock /apps /compat /data"
 	progress 70
 else
-	# Install into the mounted target; the layouts land under it.
+	# The installed system owns its feather db (index cache + receipts) under
+	# /var/lib/feather. Both installs share it; only --root differs (base at /,
+	# flavor under /flavors/<flavor>). Re-sync here (post-mount) so the index is
+	# present in the target db.
 	export FTR_DB_ROOT="$TARGET_MNT/var/lib/feather"
+	mkdir -p "$FTR_DB_ROOT"
+	ftr sync || fail "ftr sync into target db failed."
+
+	# 4a. Peacock base at the target root. The /peacock /apps /compat layouts land
+	#     under it.
+	log "installing Peacock base into /"
 	# shellcheck disable=SC2086
 	ftr install --root "$TARGET_MNT" --arch "$ARCH" \
 		--peacock-prefix "$TARGET_MNT/peacock" \
 		--apps-prefix "$TARGET_MNT/apps" \
 		--compat-prefix "$TARGET_MNT/compat" \
-		$PKGS || fail "package install failed (see log)."
+		$BASE_PKGS || fail "base package install failed (see log)."
+	progress 50
+
+	# 4b. The distro flavor as a guest under /flavors/<flavor>. layout=system, so
+	#     the prebuilt distro rootfs overlays this root verbatim. Same target db.
+	log "installing flavor base $FLAVOR_PKG into /flavors/$FLAVOR_SLUG"
+	mkdir -p "$FLAVOR_ROOT"
+	ftr install --root "$FLAVOR_ROOT" --arch "$ARCH" \
+		"$FLAVOR_PKG" || fail "flavor base install failed - is $FLAVOR_PKG published for $ARCH?"
+	# Bake the peacock guest-glue (flavor-ready signal) so peacock-init can
+	# supervise this flavor's boot.
+	apply_flavor_glue "$FLAVOR_ROOT"
+	progress 66
+
+	# 4c. Assemble the Peacock base: record the active flavor, ensure the base
+	#     trees + /sbin/init (peacock-init) + /bin/sh exist. Mirrors the builder's
+	#     assemblePeacockBase so on-device installs and image builds don't drift.
+	log "assembling Peacock base (active-flavor=$FLAVOR_SLUG)"
+	mkdir -p "$TARGET_MNT/peacock/etc" "$TARGET_MNT/apps" "$TARGET_MNT/compat" \
+		"$TARGET_MNT/data" "$TARGET_MNT/proc" "$TARGET_MNT/sys" "$TARGET_MNT/dev" \
+		"$TARGET_MNT/run" "$TARGET_MNT/bin" "$TARGET_MNT/sbin" "$TARGET_MNT/flavors"
+	printf '%s\n' "$FLAVOR_SLUG" > "$TARGET_MNT/peacock/etc/active-flavor"
+	# /etc/fstab: the initramfs mounts root by LABEL=ROOT; the running base
+	# mounts /boot (peacock_boot) + tmpfs. Mirrors the builder's WriteFstab.
+	mkdir -p "$TARGET_MNT/etc"
+	cat > "$TARGET_MNT/etc/fstab" <<'EOF'
+# /etc/fstab - generated by prp-install
+LABEL=ROOT  /      ext4   defaults          0 1
+LABEL=BOOT  /boot  ext2   defaults          0 2
+tmpfs       /tmp   tmpfs  defaults,nosuid   0 0
+EOF
+	[ -e "$TARGET_MNT/usr/bin/busybox" ] && [ ! -e "$TARGET_MNT/bin/sh" ] && \
+		ln -sf /usr/bin/busybox "$TARGET_MNT/bin/sh"
+	[ -e "$TARGET_MNT/sbin/peacock-init" ] && [ ! -e "$TARGET_MNT/sbin/init" ] && \
+		ln -sf peacock-init "$TARGET_MNT/sbin/init"
 	progress 70
 fi
 
@@ -165,7 +370,7 @@ else
 		fi
 	fi
 	sync
-	umount "$TARGET_MNT" 2>/dev/null || true
+	# boot + root unmount and the loop detaches via the EXIT trap (cleanup).
 	progress 98
 fi
 

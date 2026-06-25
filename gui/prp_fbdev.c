@@ -173,6 +173,11 @@ void prp_fbdev_clear(prp_fbdev_t *fb, uint16_t rgb565) {
     (void)msync(fb->mem, fb->mem_len, MS_SYNC);
 }
 
+// Integer upscale factor (1 = render 1:1). When >1, LVGL renders at a logical
+// resolution and each logical pixel is written as a factor×factor block.
+static int g_scale = 1;
+void prp_fbdev_set_scale(int factor) { g_scale = (factor < 1) ? 1 : factor; }
+
 void prp_fbdev_flush(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_p) {
     const prp_fbdev_t *fb = &g_fb;
     if(!fb->mem || fb->width == 0 || fb->height == 0) {
@@ -191,6 +196,44 @@ void prp_fbdev_flush(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *colo
     int32_t y2 = area->y2 > (int32_t)fb->height - 1 ? (int32_t)fb->height - 1 : area->y2;
 
     const int32_t w = (x2 - x1 + 1);
+
+    // Upscale path: LVGL rendered at a logical resolution; write each logical
+    // pixel as a g_scale×g_scale block. area/color_p are in logical coords.
+    if(g_scale > 1) {
+        const int s = g_scale;
+        const uint32_t bytespp = fb->bpp / 8u;
+        for(int32_t ly = y1; ly <= y2; ly++) {
+            for(int sy = 0; sy < s; sy++) {
+                int32_t fy = ly * s + sy;
+                if(fy >= (int32_t)fb->height) break;
+                for(int32_t lx = 0; lx < w; lx++) {
+                    const uint16_t c = color_p[lx].full;
+                    const uint32_t packed = (fb->bpp == 16) ? c : pack_pixel(fb, c);
+                    int32_t fx0 = (x1 + lx) * s;
+                    for(int sx = 0; sx < s; sx++) {
+                        int32_t fx = fx0 + sx;
+                        if(fx >= (int32_t)fb->width) break;
+                        uint8_t *dst = row_ptr(fb, fx, fy);
+                        if(!dst) continue;
+                        if(fb->bpp == 16) {
+                            *(uint16_t *)dst = (uint16_t)packed;
+                        } else if(fb->bpp == 32) {
+                            *(uint32_t *)dst = packed;
+                        } else if(fb->bpp == 24) {
+                            dst[0] = (uint8_t)(packed & 0xFFu);
+                            dst[1] = (uint8_t)((packed >> 8) & 0xFFu);
+                            dst[2] = (uint8_t)((packed >> 16) & 0xFFu);
+                        } else {
+                            (void)bytespp;
+                        }
+                    }
+                }
+            }
+            color_p += w;
+        }
+        lv_disp_flush_ready(drv);
+        return;
+    }
 
     // Fast path: framebuffer is RGB565 and LVGL is RGB565.
     if(fb->bpp == 16) {

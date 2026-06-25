@@ -1,0 +1,74 @@
+#!/bin/sh
+# prp-targets - enumerate installable partitions for the PRP installer.
+#
+# PRP has no by-name symlinks (no udev / vendor init), and busybox's blkid/fdisk
+# don't expose GPT partition names - so read the GPT directly with util-linux
+# sfdisk and list partitions by their GPT name + size. Internal eMMC + sdcard;
+# NO repartitioning (lists what exists). The installer formats the chosen one.
+#
+# Output: one target per line, e.g.
+#   /dev/mmcblk0p60 (userdata - 21.9 GiB)
+#   /dev/mmcblk1p1 (sdcard - 29.7 GiB)
+# The FIRST whitespace-token (a /dev path) is what `prp-install --disk` resolves;
+# the rest is human display.
+set -u
+
+# Find a REAL (non-busybox) sfdisk - busybox ships a broken `sfdisk` symlink that
+# shadows the util-linux one. Prefer the overlay's static build.
+find_sfdisk() {
+	for c in /sbin/sfdisk /usr/sbin/sfdisk /bin/sfdisk \
+		/mnt/prp_rootfs/sbin/sfdisk /mnt/prp_rootfs/usr/sbin/sfdisk; do
+		[ -x "$c" ] || continue
+		case "$(readlink -f "$c" 2>/dev/null)" in *busybox*) continue ;; esac
+		echo "$c"; return 0
+	done
+	return 1
+}
+SFDISK="$(find_sfdisk || true)"
+
+# Bootloader/firmware/tiny partitions never offered (brick risk). Slot _a/_b is
+# stripped before the check.
+DENY="boot lk2nd recovery modem dsp bluetooth fsg fsc ssd dpo sec bk1 bk2 sbl1 sbl rpm tz aboot abl devinfo splash misc keystore cmnlib cmnlib64 devcfg mdtp mdtpsecapp hyp pmic apdp msadp limits ddr frp config persist persistbak logfs oops logdump keymaster xbl xbl_config uefisecapp uefivarstore vbmeta dtbo metadata mota lksecapp cdt cmnlib64bak modemst1 modemst2 fsg_a fsg_b"
+strip_slot() { printf '%s' "${1%_[ab]}"; }
+is_denied() {
+	n="$(strip_slot "$1")"
+	case "$n" in bk[0-9]*|fsg*|modemst*|sbl*|rpm*|tz*|hyp*|cmnlib*|xbl*|devcfg*|pmic*) return 0 ;; esac
+	for d in $DENY; do [ "$n" = "$d" ] && return 0; done
+	return 1
+}
+
+human() {
+	b="${1:-0}"
+	if   [ "$b" -ge 1073741824 ]; then printf '%d.%d GiB' "$((b/1073741824))" "$(((b%1073741824)*10/1073741824))"
+	elif [ "$b" -ge 1048576 ];    then printf '%d MiB' "$((b/1048576))"
+	else printf '%d KiB' "$((b/1024))"; fi
+}
+
+# List a disk's GPT partitions: $1 = /dev/<disk>, $2 = hint ("" | "sdcard").
+list_disk() {
+	[ -n "$SFDISK" ] || return 0
+	"$SFDISK" -d "$1" 2>/dev/null | while IFS= read -r line; do
+		case "$line" in *" : "*name=*) ;; *) continue ;; esac
+		dev="${line%% *}"
+		name="$(printf '%s' "$line" | sed -n 's/.*name="\([^"]*\)".*/\1/p')"
+		[ -n "$name" ] || continue
+		is_denied "$name" && continue
+		secs="$(printf '%s' "$line" | sed -n 's/.*size= *\([0-9][0-9]*\).*/\1/p')"
+		[ -n "$secs" ] || secs=0
+		bytes=$((secs * 512))
+		[ "$bytes" -lt 8388608 ] && continue   # skip <8MiB; not real install targets
+		[ -b "$dev" ] || continue
+		printf '%s (%s - %s%s)\n' "$dev" "$name" "$(human "$bytes")" "${2:+ - $2}"
+	done
+}
+
+# internal eMMC
+[ -b /dev/mmcblk0 ] && list_disk /dev/mmcblk0 ""
+# sdcard / external (SD = mmcblk1+, USB = sd*)
+for sys in /sys/block/mmcblk[1-9]* /sys/block/sd[a-z]; do
+	[ -d "$sys" ] || continue
+	base="${sys##*/}"
+	for cand in "/dev/$base" "/dev/block/$base"; do
+		[ -b "$cand" ] && { list_disk "$cand" "sdcard"; break; }
+	done
+done

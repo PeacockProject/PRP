@@ -1,5 +1,5 @@
 #!/bin/sh
-# prp-net — minimal Wi-Fi/DHCP helper for the PRP installer.
+# prp-net - minimal Wi-Fi/DHCP helper for the PRP installer.
 #
 # Backed by wpa_supplicant + wpa_cli + busybox udhcpc. The installer GUI
 # forks this and reads result files (so the UI stays responsive):
@@ -22,8 +22,57 @@ STATUS_OUT=/tmp/prp-net-status
 
 log() { echo "prp-net: $*" >&2; }
 
+# Load the wifi driver if it isn't already (modules live on the rootfs; the boot
+# kernel ships none). modprobe pulls cfg80211/mac80211/wcnss_ctrl + brings up the
+# wcnss remoteproc, after which wlan0 appears. Idempotent + best-effort.
+WIFI_MODULES_TRIED=0
+wifi_present() {
+	for d in /sys/class/net/*; do
+		{ [ -d "$d/wireless" ] || [ -e "$d/phy80211" ]; } && return 0
+	done
+	return 1
+}
+load_wifi_modules() {
+	[ "$WIFI_MODULES_TRIED" = 1 ] && return 0
+	WIFI_MODULES_TRIED=1
+	wifi_present && return 0
+	command -v modprobe >/dev/null 2>&1 || return 0
+
+	# Modules + firmware live on the overlay; PRP runs from the bootstrap rootfs
+	# (/), which has no /lib. Point the standard paths at the overlay so modprobe
+	# and the kernel firmware loader find them. (Use the build-time modules.dep -
+	# don't re-run depmod, busybox depmod drops inter-module deps.)
+	ovl=/mnt/prp_rootfs
+	[ -d "$ovl/usr/lib/modules" ] || ovl=
+	if [ -n "$ovl" ]; then
+		mkdir -p /lib
+		[ -e /lib/modules ]  || ln -sfn "$ovl/usr/lib/modules" /lib/modules
+		[ -e /lib/firmware ] || ln -sfn "$ovl/lib/firmware" /lib/firmware
+		echo "$ovl/lib/firmware" > /sys/module/firmware_class/parameters/path 2>/dev/null || true
+	fi
+
+	# Bring up the wcnss core first (qcom_wcnss PIL remoteproc loads wcnss.mdt),
+	# then the wifi driver (pulls cfg80211/mac80211/wcnss_ctrl via modules.dep).
+	# Load the full chain in dependency order. modules.dep from the cross-build
+	# doesn't always capture wcn36xx's deps, so don't rely on modprobe pulling
+	# them - load each explicitly so the symbols are present when wcn36xx inserts.
+	log "loading wifi stack (wcnss PIL + cfg80211/mac80211/wcnss_ctrl + wcn36xx)"
+	for m in qcom_wcnss_pil cfg80211 mac80211 wcnss_ctrl wcn36xx; do
+		modprobe "$m" 2>/dev/null || true
+	done
+
+	# wcnss core boot + NV load takes a few seconds; wait for the wifi iface.
+	i=0
+	while [ "$i" -lt 20 ]; do
+		wifi_present && return 0
+		i=$((i + 1)); sleep 1
+	done
+	return 0
+}
+
 detect_iface() {
 	[ -n "$IFACE" ] && { echo "$IFACE"; return 0; }
+	load_wifi_modules
 	for d in /sys/class/net/*; do
 		[ -e "$d" ] || continue
 		n=$(basename "$d")
@@ -99,7 +148,13 @@ cmd_connect() {
 		echo "fail auth" >"$STATUS_OUT"; log "association failed"; return 1
 	fi
 
-	udhcpc -i "$iface" -n -q >/dev/null 2>&1 || dhcpcd "$iface" >/dev/null 2>&1 || true
+	# busybox provides the udhcpc applet but PRP doesn't symlink it, and it needs
+	# a lease script to actually apply the IP - call it via `busybox` with our
+	# script. Fall back to a bare udhcpc / dhcpcd if present.
+	DHCP_SCRIPT=/usr/share/udhcpc/default.script
+	busybox udhcpc -i "$iface" -s "$DHCP_SCRIPT" -n -q -t 8 -T 2 >/dev/null 2>&1 \
+		|| udhcpc -i "$iface" -s "$DHCP_SCRIPT" -n -q >/dev/null 2>&1 \
+		|| dhcpcd "$iface" >/dev/null 2>&1 || true
 	ip=$(ip -4 addr show "$iface" 2>/dev/null | sed -n 's/.*inet \([0-9.]*\).*/\1/p' | head -1)
 	if [ -n "$ip" ]; then
 		echo "ok $ip" >"$STATUS_OUT"; log "connected $ip"; return 0

@@ -1,0 +1,31 @@
+#!/bin/sh
+# Minimal busybox udhcpc lease script for PRP: apply the IP/route/DNS that the
+# DHCP server hands out. busybox udhcpc passes the lease via env vars
+# ($interface $ip $subnet $router $dns ...) and calls this with deconfig|bound|renew.
+RESOLV=/etc/resolv.conf
+
+case "$1" in
+	deconfig)
+		ip addr flush dev "$interface" 2>/dev/null
+		ip link set "$interface" up 2>/dev/null || ifconfig "$interface" up 2>/dev/null
+		;;
+	bound|renew)
+		# $subnet is a DOTTED netmask (not a CIDR prefix) — use ifconfig.
+		busybox ifconfig "$interface" "$ip" netmask "${subnet:-255.255.255.0}" up 2>/dev/null \
+			|| ip addr add "$ip/24" dev "$interface" 2>/dev/null
+		ip link set "$interface" up 2>/dev/null
+		# Default route(s).
+		if [ -n "$router" ]; then
+			ip route del default 2>/dev/null || busybox route del default 2>/dev/null
+			for r in $router; do
+				ip route add default via "$r" dev "$interface" 2>/dev/null \
+					|| busybox route add default gw "$r" 2>/dev/null
+			done
+		fi
+		# DNS.
+		: > "$RESOLV"
+		[ -n "$domain" ] && echo "search $domain" >> "$RESOLV"
+		for d in $dns; do echo "nameserver $d" >> "$RESOLV"; done
+		;;
+esac
+exit 0

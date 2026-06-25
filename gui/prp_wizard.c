@@ -306,11 +306,24 @@ static int prp_install_present(void) {
     return access("/usr/bin/prp-install", X_OK) == 0 || access("/sbin/prp-install", X_OK) == 0;
 }
 
+static void done_close_cb(lv_event_t *e);  /* defined with render_done below */
+
 static void install_finish(int ok) {
     if(W.install_fd >= 0) { close(W.install_fd); W.install_fd = -1; }
     if(W.install_pid > 0) { int st; (void)waitpid(W.install_pid, &st, WNOHANG); W.install_pid = 0; }
     if(W.prog_timer) { lv_timer_del(W.prog_timer); W.prog_timer = NULL; }
-    if(ok) { W.step = ST_DONE; render_step(); }
+    if(ok) { W.step = ST_DONE; render_step(); return; }
+    /* Failure: the footer is hidden during PROGRESS, so the user would be stuck.
+     * Offer a way back to the recovery menu (nothing past the logged steps ran). */
+    wlog("");
+    wlog("Install failed. You can return to recovery and try again.");
+    lv_obj_t *back = lv_btn_create(W.content);
+    lv_obj_set_width(back, lv_pct(80));
+    lv_obj_set_height(back, clampi(W.cfg.screen_h / 14, 56, 120));
+    lv_obj_t *bl = mk_label(back, "Back to recovery", W.f_body, PK_CREAM);
+    lv_obj_center(bl);
+    style_btn(back, bl, true);
+    lv_obj_add_event_cb(back, done_close_cb, LV_EVENT_CLICKED, NULL);
 }
 
 /* Parse one line of prp-install's STEP/PROGRESS/LOG/DONE/ERROR protocol. */

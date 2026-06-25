@@ -34,7 +34,26 @@ static volatile sig_atomic_t g_stop = 0;
 static uint32_t g_screen_w = 1080;
 static uint32_t g_screen_h = 1920;
 static int g_scale_pct = 100;
+static int g_touch_div = 1;   // divide raw touch coords by the DPI factor (logical render)
 static char g_logo_path[256] = {0};
+
+// The evdev driver reports raw panel-pixel coords; when we render at a logical
+// resolution (DPI upscale), scale touch down by the same factor so taps land on
+// the right widget.
+// evdev_read clamps its reported point to the (logical) display resolution, which
+// destroys the real position when we render scaled. The driver keeps the raw,
+// pre-clamp panel coordinate in these globals — use them and scale by the factor.
+extern int evdev_root_x;
+extern int evdev_root_y;
+static void prp_evdev_read_scaled(lv_indev_drv_t *drv, lv_indev_data_t *data) {
+    evdev_read(drv, data);   // pumps events: updates evdev_root_x/y + button state
+    if(g_touch_div > 1) {
+        data->point.x = (lv_coord_t)(evdev_root_x / g_touch_div);
+        data->point.y = (lv_coord_t)(evdev_root_y / g_touch_div);
+        if(data->point.x >= (lv_coord_t)g_screen_w) data->point.x = (lv_coord_t)g_screen_w - 1;
+        if(data->point.y >= (lv_coord_t)g_screen_h) data->point.y = (lv_coord_t)g_screen_h - 1;
+    }
+}
 
 static prp_wizard_cfg_t g_wiz;
 static void launch_wizard(void) { prp_wizard_show(&g_wiz); }
@@ -482,6 +501,31 @@ static void usage(const char *argv0) {
     fprintf(stderr, "usage: %s [--config PATH] [--fbdev PATH] [--input PATH] [--scale PCT]\\n", argv0);
 }
 
+/* Build the "INSTALL TO" dropdown options ("a\nb\nc") by running prp-targets,
+ * which lists installable partitions (by-name preferred, sdcard included). The
+ * returned static buffer's first token per line is what prp-install resolves. */
+static const char *enumerate_install_targets(void) {
+    static char buf[2048];
+    size_t off = 0;
+    buf[0] = '\0';
+    FILE *fp = popen("prp-targets 2>/dev/null", "r");
+    if(fp) {
+        char line[256];
+        while(fgets(line, sizeof(line), fp)) {
+            size_t n = strlen(line);
+            while(n && (line[n-1] == '\n' || line[n-1] == '\r')) line[--n] = '\0';
+            if(n == 0) continue;
+            if(off && off + 1 < sizeof(buf)) buf[off++] = '\n';
+            for(size_t i = 0; i < n && off + 1 < sizeof(buf); i++) buf[off++] = line[i];
+            buf[off] = '\0';
+        }
+        pclose(fp);
+    }
+    if(buf[0] == '\0')
+        snprintf(buf, sizeof(buf), "%s", "(no install targets found)");
+    return buf;
+}
+
 int main(int argc, char **argv) {
     signal(SIGINT, on_sig);
     signal(SIGTERM, on_sig);
@@ -531,6 +575,25 @@ int main(int argc, char **argv) {
     prp_fbdev_clear(&fb, 0x0000);
     g_screen_w = fb.width;
     g_screen_h = fb.height;
+
+    // DPI scaling: render the UI at a LOGICAL resolution (native / factor) and
+    // upscale factor× in the fbdev flush. Two wins at once — fewer pixels are
+    // software-rendered (smoother swipes) and the whole UI is uniformly larger
+    // (readable on a high-DPI panel like daisy's 1080x2280). The factor comes
+    // from scale_pct (200 -> 2x). On the logical canvas the UI then lays out
+    // neutrally (scale_pct reset to 100); the flush does the upscale + touch
+    // auto-maps because the evdev driver scales to the display resolution.
+    int dpi_factor = g_scale_pct / 100;
+    if(dpi_factor < 1) dpi_factor = 1;
+    if(dpi_factor > 1) {
+        g_screen_w = (int)fb.width / dpi_factor;
+        g_screen_h = (int)fb.height / dpi_factor;
+        prp_fbdev_set_scale(dpi_factor);
+        g_touch_div = dpi_factor;
+        g_scale_pct = 100;
+        fprintf(stderr, "prp-gui: DPI scale %dx -> logical %dx%d (panel %ux%u)\n",
+                dpi_factor, g_screen_w, g_screen_h, fb.width, fb.height);
+    }
 
     lv_disp_draw_buf_t draw_buf;
     // Modest draw buffer: fixed number of lines to keep memory bounded.
@@ -587,7 +650,7 @@ int main(int argc, char **argv) {
     lv_indev_drv_t indev_drv;
     lv_indev_drv_init(&indev_drv);
     indev_drv.type = LV_INDEV_TYPE_POINTER;
-    indev_drv.read_cb = evdev_read;
+    indev_drv.read_cb = prp_evdev_read_scaled;
     lv_indev_drv_register(&indev_drv);
 
     // Optional power key input device for Android-style long-press power menu.
@@ -657,7 +720,7 @@ int main(int argc, char **argv) {
     g_wiz.inits = "systemd\nOpenRC";
     g_wiz.desktops = "None\nXFCE\nKDE Plasma\nGNOME\nMATE\nCinnamon\nLXQt";
     g_wiz.dms = "None\nSDDM\nLightDM\ngreetd\nGDM\nly";
-    g_wiz.disks = "Internal storage";
+    g_wiz.disks = enumerate_install_targets();   /* real partitions via prp-targets */
     g_wiz.wifi_ssids = "(Wi-Fi scan coming soon)";   /* prp-net wires real scanning */
     ui_cfg.on_install = launch_wizard;
     ui_cfg.on_network = launch_network;

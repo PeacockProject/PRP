@@ -38,3 +38,7 @@ void prp_fbdev_deinit(prp_fbdev_t *fb);
 void prp_fbdev_clear(prp_fbdev_t *fb, uint16_t rgb565);
 
 void prp_fbdev_flush(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *color_p);
+
+// Set an integer upscale factor: LVGL renders at a logical resolution and the
+// flush writes each logical pixel as a factor×factor block to the panel. 1 = none.
+void prp_fbdev_set_scale(int factor);

@@ -1,0 +1,85 @@
+#!/bin/sh
+# prp-install-bootloader - device boot hook for prp-install.
+#
+# Stages the installed system's extlinux boot assets into the nested BOOT
+# partition (peacock_boot) of the userdata container - exactly like the desktop
+# builder's stageExtlinuxBootAssets. lk2nd reads /boot/extlinux/extlinux.conf
+# from peacock_boot and boots kernel + initramfs + dtb. NOTHING outside the
+# container (boot_a / lk2nd) is touched.
+#
+#   1. peacock-mkinitfs -> initramfs that finds LABEL=ROOT in the container and
+#                          switch_roots into the installed base (PID1 peacock-init)
+#   2. install kernel + initramfs + dtb into <target>/boot (= peacock_boot)
+#   3. write <target>/boot/extlinux/extlinux.conf
+#
+# Args: <target_mnt> <arch>.  <target>/boot must already be the mounted peacock_boot.
+# Safe by construction: missing tool / kernel => hard ERROR, nothing flashed.
+set -u
+
+TARGET_MNT="${1:-/mnt/peacock-target}"
+ARCH="${2:-$(uname -m 2>/dev/null || echo aarch64)}"
+
+log()  { printf 'LOG %s\n' "$*"; }
+fail() { printf 'ERROR %s\n' "$*"; exit 1; }
+
+# Device params (templated at PRP-build time), env overrides, then defaults.
+[ -r /etc/prp/device.conf ] && . /etc/prp/device.conf
+DEVICE_CODENAME="${DEVICE_CODENAME:-unknown}"
+# The nested root carries LABEL=ROOT (matches the builder's image + subparts +
+# peacock-mkinitfs); the device.conf ROOT_LABEL is for the legacy flash layout.
+ROOT_LABEL="ROOT"
+BOOT_CMDLINE="${BOOT_CMDLINE:-}"
+DRYRUN="${PRP_BL_DRYRUN:-0}"
+run() { if [ "$DRYRUN" = 1 ]; then log "(dry-run) $*"; else "$@"; fi; }
+
+command -v peacock-mkinitfs >/dev/null 2>&1 || fail "peacock-mkinitfs missing in PRP - cannot build the installed initramfs."
+BUSYBOX="$(command -v busybox 2>/dev/null || echo /usr/bin/busybox)"
+
+BOOTDIR="$TARGET_MNT/boot"
+[ -d "$BOOTDIR" ] || fail "$BOOTDIR missing (peacock_boot not mounted?)."
+
+# --- locate the installed kernel + dtb (installed by device-$DEVICE_CODENAME) --
+KERNEL=""
+for k in "$BOOTDIR/zImage" "$BOOTDIR/Image.gz" "$BOOTDIR/Image" "$BOOTDIR/vmlinuz" "$BOOTDIR/kernel"; do
+	[ -f "$k" ] && { KERNEL="$k"; break; }
+done
+[ -n "$KERNEL" ] || fail "no installed kernel under $BOOTDIR - is device-$DEVICE_CODENAME (kernel) installed?"
+DTB=""
+for d in "$TARGET_MNT"/boot/dtbs/*/*.dtb "$TARGET_MNT"/boot/dtbs/*.dtb "$BOOTDIR/dtb"; do
+	[ -f "$d" ] && { DTB="$d"; break; }
+done
+log "kernel: $KERNEL${DTB:+   dtb: $DTB}"
+
+# --- 1. installed-system initramfs (finds LABEL=ROOT in the container) ---------
+RAMDISK="$BOOTDIR/initramfs.cpio.gz"
+mkargs="--device $DEVICE_CODENAME --arch $ARCH --init openrc --root-label $ROOT_LABEL --busybox $BUSYBOX --output $RAMDISK"
+command -v resize2fs >/dev/null 2>&1 && mkargs="$mkargs --resize2fs $(command -v resize2fs)"
+[ -f /usr/bin/peacock-splash ] && mkargs="$mkargs --splash /usr/bin/peacock-splash"
+log "generating installed-system initramfs (root=$ROOT_LABEL)"
+# shellcheck disable=SC2086
+run peacock-mkinitfs build $mkargs || fail "peacock-mkinitfs failed"
+
+# --- 2. stage extlinux assets (mirror builder stageExtlinuxBootAssets) ---------
+# Kernel as /boot/zImage (+ vmlinuz alias); initramfs already at /boot/initramfs.cpio.gz.
+[ "$KERNEL" = "$BOOTDIR/zImage" ] || run cp -f "$KERNEL" "$BOOTDIR/zImage"
+run cp -f "$BOOTDIR/zImage" "$BOOTDIR/vmlinuz" 2>/dev/null || true
+DTB_LINE=""
+if [ -n "$DTB" ]; then
+	mkdir -p "$BOOTDIR/dtbs"
+	dtbname="$(basename "$DTB")"
+	[ "$DTB" = "$BOOTDIR/dtbs/$dtbname" ] || run cp -f "$DTB" "$BOOTDIR/dtbs/$dtbname"
+	DTB_LINE="    fdt /dtbs/$dtbname
+"
+fi
+
+mkdir -p "$BOOTDIR/extlinux"
+cmd="$(printf '%s' "$BOOT_CMDLINE" | tr '\n' ' ')"
+if [ "$DRYRUN" = 1 ]; then
+	log "(dry-run) write $BOOTDIR/extlinux/extlinux.conf (append: $cmd)"
+else
+	printf 'default peacock\nlabel peacock\n    linux /zImage\n    initrd /initramfs.cpio.gz\n%s    append %s\n' \
+		"$DTB_LINE" "$cmd" > "$BOOTDIR/extlinux/extlinux.conf" \
+		|| fail "writing extlinux.conf failed"
+fi
+run sync
+log "bootloader: staged extlinux into peacock_boot; lk2nd boots the container (boot_a untouched)"

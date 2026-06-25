@@ -1215,6 +1215,25 @@ EOF
       fi
     fi
     # Always provide a raw TCP shell endpoint as a more reliable fallback.
+    # The cmd-loop program must exist regardless of DEBUG_BOOT: the telnet block
+    # above only creates $rawsh when DEBUG_BOOT=1, but this tcpsvd runs always —
+    # so without this, 2324 execs a missing /tmp/rawsh and every connection dies
+    # instantly (no banner, reset on write).
+    if [ ! -f "$rawsh" ]; then
+      cat > "$rawsh" <<'EOF'
+#!/bin/sh
+export PATH=/sbin:/bin:/usr/sbin:/usr/bin
+export TERM=vt100
+echo "PRP cmd shell ready (one command per line, 'exit' to close)"
+while IFS= read -r line; do
+  [ -n "$line" ] || continue
+  [ "$line" = "exit" ] && break
+  /bin/sh -c "$line" 2>&1
+  echo "__PRP_EOC__"
+done
+EOF
+      $BB chmod 0755 "$rawsh" >/dev/null 2>&1 || true
+    fi
     $BB killall tcpsvd >/dev/null 2>&1 || true
     $BB tcpsvd -vE 0.0.0.0 "$RAW_SHELL_PORT" "$rawsh" >/tmp/tcpsvd-raw.log 2>&1 &
     $BB sleep 1
