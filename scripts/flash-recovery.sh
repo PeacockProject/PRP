@@ -57,7 +57,10 @@ case "$FLASH_METHOD" in
 
       if [[ -n "${FASTBOOT_SET_ACTIVE:-}" ]]; then
         echo "set active slot (pre-flash): ${FASTBOOT_SET_ACTIVE}"
-        "${FASTBOOT_CMD[@]}" set_active "$FASTBOOT_SET_ACTIVE" || die "failed to set active slot before boot flash"
+        # lk2nd's fastboot doesn't implement set_active; it also already booted
+        # from the active slot, so this is best-effort, not fatal.
+        "${FASTBOOT_CMD[@]}" set_active "$FASTBOOT_SET_ACTIVE" || \
+          echo "warning: set_active ${FASTBOOT_SET_ACTIVE} unsupported (lk2nd); continuing" >&2
       fi
 
       if [[ -n "${FASTBOOT_LK2ND_IMAGE:-}" ]]; then
@@ -71,7 +74,8 @@ case "$FLASH_METHOD" in
 
       if [[ -n "${FASTBOOT_SET_ACTIVE:-}" ]]; then
         echo "set active slot (post-flash): ${FASTBOOT_SET_ACTIVE}"
-        "${FASTBOOT_CMD[@]}" set_active "$FASTBOOT_SET_ACTIVE" || die "failed to set active slot after boot flash"
+        "${FASTBOOT_CMD[@]}" set_active "$FASTBOOT_SET_ACTIVE" || \
+          echo "warning: set_active ${FASTBOOT_SET_ACTIVE} unsupported (lk2nd); continuing" >&2
       fi
     else
       for part in $FASTBOOT_PARTITIONS; do

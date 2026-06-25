@@ -226,6 +226,12 @@ fi
 if [[ "${PRP_MONOLITHIC_INITRAMFS:-0}" == "1" ]]; then
   PRP_OVERLAY_STAGE_ONLY=1 "$SCRIPT_DIR/build-overlay.sh" "$CFG" "$OUT_DIR"
   if [[ -d "$OUT_DIR/overlay-stage" ]]; then
+    # The prp-runtime feather ships a RAW initramfs/rootfs/init (template
+    # placeholders intact). /init is the initramfs's job — already finalized
+    # above (ELF stub + substituted /init.sh). Drop the overlay's copy so it
+    # can't clobber our finalized init (else @PRP_USB_UDC_NAME@ etc. ship raw,
+    # breaking RNDIS and the monolithic/mount flags).
+    rm -f "$OUT_DIR/overlay-stage/init" "$OUT_DIR/overlay-stage/init.sh"
     cp -a "$OUT_DIR/overlay-stage"/. "$STAGE_DIR"/
   else
     die "monolithic initramfs requested but overlay stage is missing"
