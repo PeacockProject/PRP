@@ -163,6 +163,15 @@ if [[ -n "$FW_FEATHER" ]]; then
     && echo "assemble: firmware <- $(basename "$FW_FEATHER")" \
     || echo "assemble: WARN no lib/firmware in $(basename "$FW_FEATHER")"
 fi
+# Generic wireless-regdb (regulatory.db) so 5GHz/DFS channels become usable once
+# a country is set (prp-net WIFI_COUNTRY). Vendored in-repo; the kernel verifies
+# the .p7s signature against its built-in regdb keys (CFG80211_USE_KERNEL_REGDB_KEYS).
+if [[ -f "$PRP_ROOT/firmware/wireless-regdb/regulatory.db" ]]; then
+  mkdir -p "$STAGE/lib/firmware"
+  cp "$PRP_ROOT/firmware/wireless-regdb/regulatory.db" \
+     "$PRP_ROOT/firmware/wireless-regdb/regulatory.db.p7s" "$STAGE/lib/firmware/"
+  echo "assemble: regulatory.db <- vendored wireless-regdb"
+fi
 # Regenerate modules.dep so on-device modprobe can resolve the wifi stack.
 KVER=$(ls "$STAGE/usr/lib/modules/" 2>/dev/null | head -1)
 if [[ -n "$KVER" ]] && command -v depmod >/dev/null 2>&1; then

@@ -19,6 +19,12 @@ WPA_CONF=/tmp/prp-wpa.conf
 WPA_CTRL=/var/run/wpa_supplicant
 SCAN_OUT=/tmp/prp-net-scan
 STATUS_OUT=/tmp/prp-net-status
+# Regulatory country (ISO-3166 alpha-2). Needed so 5GHz DFS channels are usable
+# — without it the radio associates but can't TX, so DHCP never completes. NOT
+# hardcoded to any region: set per-user (the installer GUI writes
+# /etc/prp/wifi-country, or pass PRP_WIFI_COUNTRY in the env). Empty = world
+# domain, which is fine for 2.4GHz everywhere; a country is only needed for 5GHz.
+WIFI_COUNTRY="${PRP_WIFI_COUNTRY:-$(cat /etc/prp/wifi-country 2>/dev/null || true)}"
 
 log() { echo "prp-net: $*" >&2; }
 
@@ -91,19 +97,26 @@ iface_up() {
 ensure_wpa() {
 	iface="$1"
 	iface_up "$iface"
-	if wpa_cli -i "$iface" status >/dev/null 2>&1; then
-		return 0
+	if ! wpa_cli -i "$iface" status >/dev/null 2>&1; then
+		mkdir -p "$WPA_CTRL"
+		if [ ! -f "$WPA_CONF" ]; then
+			printf 'ctrl_interface=%s\nupdate_config=1\n' "$WPA_CTRL" >"$WPA_CONF"
+			[ -n "$WIFI_COUNTRY" ] && printf 'country=%s\n' "$WIFI_COUNTRY" >>"$WPA_CONF"
+		fi
+		wpa_supplicant -B -i "$iface" -c "$WPA_CONF" >/dev/null 2>&1
+		# wait for the control socket to come up
+		i=0
+		while [ "$i" -lt 10 ]; do
+			wpa_cli -i "$iface" status >/dev/null 2>&1 && break
+			i=$((i + 1)); sleep 1
+		done
+		wpa_cli -i "$iface" status >/dev/null 2>&1 || return 1
 	fi
-	mkdir -p "$WPA_CTRL"
-	[ -f "$WPA_CONF" ] || printf 'ctrl_interface=%s\nupdate_config=1\n' "$WPA_CTRL" >"$WPA_CONF"
-	wpa_supplicant -B -i "$iface" -c "$WPA_CONF" >/dev/null 2>&1
-	# wait for the control socket to come up
-	i=0
-	while [ "$i" -lt 10 ]; do
-		wpa_cli -i "$iface" status >/dev/null 2>&1 && return 0
-		i=$((i + 1)); sleep 1
-	done
-	return 1
+	# Apply the regulatory country (idempotent, also covers an already-running
+	# supplicant) so 5GHz DFS channels become usable. Requires regulatory.db in
+	# /lib/firmware (the kernel verifies its signature against built-in keys).
+	[ -n "$WIFI_COUNTRY" ] && wpa_cli -i "$iface" set country "$WIFI_COUNTRY" >/dev/null 2>&1
+	return 0
 }
 
 cmd_scan() {
