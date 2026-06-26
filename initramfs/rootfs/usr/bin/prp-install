@@ -379,6 +379,10 @@ else
 	[ -f /etc/prp/wifi-country ] && cp /etc/prp/wifi-country "$TARGET_MNT/peacock/etc/network/wifi-country" 2>/dev/null || true
 	[ -f "$TARGET_MNT/peacock/etc/network/wpa.conf" ] && log "saved Wi-Fi credentials to the base"
 
+	# Hand the genmirror blueprints base to the base so the first-boot OOBE knows where to fetch
+	# <base>/<flavor>/configure.toml (it appends the active flavor). No rebuild needed to retarget.
+	[ -f /etc/peacock/blueprints-base ] && cp /etc/peacock/blueprints-base "$TARGET_MNT/peacock/etc/blueprints-base" 2>/dev/null || true
+
 	sync
 	# boot + root unmount and the loop detaches via the EXIT trap (cleanup).
 	progress 98
