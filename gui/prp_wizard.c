@@ -44,14 +44,7 @@ static struct {
     char flavor[32], init_s[32], desktop[32], dm[32], disk[64];
     char user[64], pass[64], host[64], wifi[64];
     bool net_ok;
-
-    // blueprint-driven Options (P1): when a blueprint is loaded, the install-phase fields render
-    // from it (polymorphic UI) into bp_w[]/bp_f[], captured into the answers store.
-    bp_blueprint *bp;
-    bp_answers *ans;
-    lv_obj_t *bp_w[24];
-    const bp_field *bp_f[24];
-    int n_bp_w;
+    char flavors_buf[512];   // flavor list fetched from the genmirror blueprint index (cached)
 
     lv_timer_t *prog_timer;
     int prog_i;
@@ -172,80 +165,6 @@ static lv_obj_t *mk_textfield(const char *label, const char *placeholder, bool p
     return ta;
 }
 
-/* ---- blueprint-driven fields (P1 polymorphic UI) ---- */
-/* Select the dropdown option whose text equals `val` (no-op if not found). */
-static void dropdown_select_in(lv_obj_t *dd, const char *opts, const char *val) {
-    if(!dd || !opts || !val || !*val) return;
-    int idx = 0;
-    for(const char *p = opts; p; ) {
-        const char *nl = strchr(p, '\n');
-        size_t len = nl ? (size_t)(nl - p) : strlen(p);
-        if(strlen(val) == len && strncmp(p, val, len) == 0) { lv_dropdown_set_selected(dd, idx); return; }
-        idx++;
-        p = nl ? nl + 1 : NULL;
-    }
-}
-
-/* Render every field of the blueprint's `phase` stages into W.content, honoring when/default and
- * recording each input widget in bp_w[]/bp_f[] for capture. Reuses mk_dropdown/mk_textfield. */
-static void bp_render_fields(bp_phase phase) {
-    W.n_bp_w = 0;
-    if(!W.bp || !W.ans) return;
-    const bp_stage *ord[64];
-    size_t n = bp_phase_order(W.bp, phase, ord);
-    for(size_t s = 0; s < n; s++) {
-        const bp_stage *st = ord[s];
-        if(!bp_when_eval(st->when, W.ans)) continue;
-        for(size_t i = 0; i < st->n_fields; i++) {
-            const bp_field *f = &st->fields[i];
-            if(!bp_when_eval(f->when, W.ans)) continue;
-            const char *cur = f->key ? bp_answers_get(W.ans, f->key) : NULL;
-            char *defv = bp_expand(f->def ? f->def : "", W.ans);
-            const char *initv = (cur && *cur) ? cur : defv;
-            lv_obj_t *w = NULL;
-            switch(f->type) {
-                case BP_FIELD_DROPDOWN:
-                    w = mk_dropdown(f->label, f->options);
-                    dropdown_select_in(w, f->options, initv);
-                    break;
-                case BP_FIELD_TOGGLE:
-                    w = mk_dropdown(f->label, "false\ntrue");
-                    dropdown_select_in(w, "false\ntrue", initv);
-                    break;
-                case BP_FIELD_PASSWORD:
-                    w = mk_textfield(f->label, f->placeholder ? f->placeholder : "", true);
-                    break;
-                case BP_FIELD_TEXT:
-                    w = mk_textfield(f->label, f->placeholder ? f->placeholder : "", false);
-                    if(initv && *initv) lv_textarea_set_text(w, initv);
-                    break;
-                case BP_FIELD_INFO:
-                    mk_label(W.content, f->label, W.f_body, PK_DIM);
-                    break;
-            }
-            free(defv);
-            if(w && f->key && W.n_bp_w < 24) { W.bp_w[W.n_bp_w] = w; W.bp_f[W.n_bp_w] = f; W.n_bp_w++; }
-        }
-    }
-}
-
-/* Read the rendered fields back into the answers store, validating. Returns 0 if a required/regex
- * check fails (caller stays on the step). Passwords are captured but never persisted. */
-static int bp_capture_fields(void) {
-    for(int i = 0; i < W.n_bp_w; i++) {
-        const bp_field *f = W.bp_f[i];
-        char val[256] = "";
-        if(f->type == BP_FIELD_DROPDOWN || f->type == BP_FIELD_TOGGLE)
-            lv_dropdown_get_selected_str(W.bp_w[i], val, sizeof val);
-        else
-            snprintf(val, sizeof val, "%s", lv_textarea_get_text(W.bp_w[i]));
-        if(f->required && !*val) return 0;
-        if(!bp_validate(f->validate, val)) return 0;
-        if(f->type != BP_FIELD_PASSWORD) bp_answers_set(W.ans, f->key, val);
-    }
-    return 1;
-}
-
 /* ---- steps ---- */
 static void render_welcome(void) {
     char line[160];
@@ -300,18 +219,25 @@ static void render_options(void) {
     mk_kicker(W.content, "STEP · OPTIONS");
     mk_label(W.content, "Set it up", W.f_title, PK_CREAM);
 
-    /* Only the true install mechanics are native: flavor (also selects WHICH blueprint is used)
-     * and the target disk (the partition target). Everything else is scriptable — rendered from
-     * the blueprint's install-phase fields. Desktop/login/account/timezone are oobe-phase and
-     * configured by the first-boot OOBE, not here. */
-    W.dd_flavor = mk_dropdown("BASE DISTRO", W.cfg.flavors);
-    W.dd_disk   = mk_dropdown("INSTALL TO", W.cfg.disks);
-
-    if(!W.bp) {
-        mk_label(W.content, "Installer blueprint unavailable.", W.f_body, PK_DIM);
-        return;
+    /* PRP asks ONLY what the install itself needs: the flavor (list fetched from the genmirror
+     * blueprints), the base init system, and the target disk. Account, hostname, desktop, login
+     * manager and timezone are all asked FRESH by the first-boot OOBE — driven by the flavor's
+     * blueprint — so they are deliberately not here. */
+    /* Fetch the flavor list from genmirror's blueprint index now that the network step is done —
+     * so adding a flavor never needs a PRP rebuild. Cached after the first fetch; on failure (or
+     * no base URL) falls back to the built-in cfg.flavors. */
+    const char *flavors = W.cfg.flavors;
+    if(W.cfg.blueprint_base_url && *W.cfg.blueprint_base_url && W.cfg.blueprint_pubkey) {
+        if(!W.flavors_buf[0]) {
+            char err[256];
+            bp_fetch_flavors(W.cfg.blueprint_base_url, W.cfg.blueprint_pubkey,
+                             W.flavors_buf, sizeof W.flavors_buf, err, sizeof err);
+        }
+        if(W.flavors_buf[0]) flavors = W.flavors_buf;
     }
-    bp_render_fields(BP_PHASE_INSTALL);
+    W.dd_flavor = mk_dropdown("FLAVOR", flavors);
+    W.dd_init   = mk_dropdown("INIT SYSTEM", W.cfg.inits);
+    W.dd_disk   = mk_dropdown("INSTALL TO", W.cfg.disks);
 }
 
 static void summary_row(const char *k, const char *v) {
@@ -338,11 +264,10 @@ static void render_confirm(void) {
     summary_row("DEVICE", W.cfg.device_name);
     snprintf(net, sizeof(net), W.net_ok ? "Wi-Fi: %s" : "%s", W.net_ok ? W.wifi : "Wired / continue");
     summary_row("NETWORK", net);
-    summary_row("DISTRO", W.flavor);
+    summary_row("FLAVOR", W.flavor);
     summary_row("INIT", W.init_s);
-    summary_row("HOSTNAME", W.ans ? bp_answers_get(W.ans, "host") : W.host);
     summary_row("INSTALL TO", W.disk);
-    summary_row("FIRST BOOT", "Desktop, login + account configured on first boot");
+    summary_row("FIRST BOOT", "Account, desktop + timezone set up on first boot");
 }
 
 static const char *k_prog_steps[] = {
@@ -562,13 +487,8 @@ static int capture_step(void) {
         snprintf(W.wifi, sizeof(W.wifi), "%s", prp_net_ui_status());
     } else if(W.step == ST_OPTIONS) {
         if(W.dd_flavor) lv_dropdown_get_selected_str(W.dd_flavor, W.flavor, sizeof(W.flavor));
+        if(W.dd_init)   lv_dropdown_get_selected_str(W.dd_init, W.init_s, sizeof(W.init_s));
         if(W.dd_disk)   lv_dropdown_get_selected_str(W.dd_disk, W.disk, sizeof(W.disk));
-        if(!W.bp || !W.ans) return 1;
-        bp_answers_set(W.ans, "flavor", W.flavor); /* expose to blueprint when/actions */
-        if(!bp_capture_fields()) return 0;         /* required/regex failed — stay on the step */
-        /* sync the answers the install backend still consumes directly */
-        const char *iv = bp_answers_get(W.ans, "init"); if(iv) snprintf(W.init_s, sizeof W.init_s, "%s", iv);
-        const char *hv = bp_answers_get(W.ans, "host"); if(hv) snprintf(W.host, sizeof W.host, "%s", hv);
     }
     return 1;
 }
@@ -617,30 +537,8 @@ static void render_step(void) {
 
 void prp_wizard_show(const prp_wizard_cfg_t *cfg) {
     if(W.root) return;
-    if(W.bp) { bp_free(W.bp); W.bp = NULL; }
-    if(W.ans) { bp_answers_free(W.ans); W.ans = NULL; }
     memset(&W, 0, sizeof(W));
     W.cfg = *cfg;
-    /* Prefer a live, verified blueprint fetched from genmirror for the default flavor (keeps flavor
-     * setup decoupled from the recovery image); fall back to the bundled one. */
-    const char *bp_path = cfg->blueprint_path;
-    if(cfg->blueprint_base_url && *cfg->blueprint_base_url && cfg->blueprint_pubkey) {
-        char flav[32] = "arch";
-        if(cfg->flavors && *cfg->flavors) {
-            snprintf(flav, sizeof flav, "%s", cfg->flavors);
-            char *nl = strchr(flav, '\n'); if(nl) *nl = '\0';
-            for(char *p = flav; *p; p++) *p = (char)tolower((unsigned char)*p);
-        }
-        char url[512], err[256];
-        snprintf(url, sizeof url, "%s/%s.toml", cfg->blueprint_base_url, flav);
-        if(bp_fetch_verify(url, cfg->blueprint_pubkey, "/tmp/prp-blueprint.toml", err, sizeof err) == 0)
-            bp_path = "/tmp/prp-blueprint.toml";
-    }
-    if(bp_path && *bp_path) {
-        char err[256];
-        W.bp = bp_load(bp_path, err, sizeof err);
-        W.ans = bp_answers_load(""); /* empty store; persisted to the target at install */
-    }
     const int w = cfg->screen_w, h = cfg->screen_h;
     const int scale = clampi(cfg->scale_pct, 50, 200);
     W.margin = clampi((h / 36) * scale / 100, 12, 64);

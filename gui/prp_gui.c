@@ -722,8 +722,7 @@ int main(int argc, char **argv) {
     g_wiz.dms = "None\nSDDM\nLightDM\ngreetd\nGDM\nly";
     g_wiz.disks = enumerate_install_targets();   /* real partitions via prp-targets */
     g_wiz.wifi_ssids = "(Wi-Fi scan coming soon)";   /* prp-net wires real scanning */
-    /* Bundled fallback blueprint; the wizard prefers a live, verified one from genmirror. */
-    g_wiz.blueprint_path = "/usr/share/peacock/blueprints/default.toml";
+    /* The wizard fetches the flavor list from genmirror's blueprint index (verified). */
     g_wiz.blueprint_pubkey = "/etc/feather/genmirror.pub";
     {
         /* genmirror blueprints base URL, written by assemble at /etc/peacock/blueprints-base

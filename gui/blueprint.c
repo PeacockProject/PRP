@@ -442,3 +442,42 @@ int bp_fetch_verify(const char *url, const char *pubkey_path, const char *out_pa
 	}
 	return 0;
 }
+
+int bp_fetch_flavors(const char *base_url, const char *pubkey_path, char *out, size_t outcap,
+                     char *err, size_t errsz) {
+	char url[600];
+	snprintf(url, sizeof url, "%s/index.toml", base_url);
+	if (bp_fetch_verify(url, pubkey_path, "/tmp/prp-bp-index.toml", err, errsz) != 0) return -1;
+	FILE *fp = fopen("/tmp/prp-bp-index.toml", "r");
+	if (!fp) { snprintf(err, errsz, "no index"); return -1; }
+	char terr[200];
+	toml_table_t *root = toml_parse_file(fp, terr, sizeof terr);
+	fclose(fp);
+	if (!root) { snprintf(err, errsz, "parse index: %s", terr); return -1; }
+	toml_array_t *arr = toml_array_in(root, "flavor");
+	out[0] = '\0';
+	size_t len = 0;
+	int count = 0;
+	if (arr) {
+		int n = toml_array_nelem(arr);
+		for (int i = 0; i < n; i++) {
+			toml_table_t *t = toml_table_at(arr, i);
+			if (!t) continue;
+			char *nm = tstr(t, "name");
+			if (!nm) nm = tstr(t, "id");
+			if (!nm) continue;
+			size_t nl = strlen(nm);
+			if (len + nl + 2 < outcap) {
+				if (len) out[len++] = '\n';
+				memcpy(out + len, nm, nl);
+				len += nl;
+				out[len] = '\0';
+				count++;
+			}
+			free(nm);
+		}
+	}
+	toml_free(root);
+	if (count == 0) { snprintf(err, errsz, "index lists no flavors"); return -1; }
+	return count;
+}

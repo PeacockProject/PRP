@@ -368,31 +368,19 @@ else
 fi
 
 # ---- 6. finalize: user + hostname + init --------------------------------------
-step 6 "Writing first-boot setup + network"
+step 6 "Saving network for first boot"
 if sim; then
-	log "would write answers.toml (flavor=$FLAVOR_SLUG init=$INIT host=$HOSTNAME) + save network creds"
+	log "would save network creds to the base (all config happens at first boot)"
 	progress 98
 else
-	# hostname is an install-phase setting (the account + desktop are NOT created here — the
-	# first-boot OOBE asks for them; the password is never carried through the installer).
-	[ -n "$HOSTNAME" ] && echo "$HOSTNAME" > "$TARGET_MNT/etc/hostname" 2>/dev/null || true
-
-	# First-boot handoff: the base OOBE reads this to learn the flavor + install-phase answers and
-	# that oobe-phase config (account/desktop/timezone) is still pending (oobe_done=false).
-	mkdir -p "$TARGET_MNT/peacock/etc/oobe"
-	{
-		printf '[meta]\nschema = 1\nflavor = "%s"\ninstall_done = true\noobe_done = false\n\n' "$FLAVOR_SLUG"
-		printf '[answers]\nflavor = "%s"\ninit = "%s"\nhost = "%s"\n\n' "$FLAVOR_SLUG" "$INIT" "$HOSTNAME"
-		printf '[stage_status]\n'
-	} > "$TARGET_MNT/peacock/etc/oobe/answers.toml"
-	log "wrote first-boot answers (flavor=$FLAVOR_SLUG, oobe pending)"
-
-	# Hand the connected Wi-Fi to the base so first boot has network for the OOBE's package
-	# downloads (consumed by the base networking, P4). Creds come from the live PRP session;
-	# prp-net save_config'd them into the wpa conf.
+	# The ONLY thing PRP hands to the base is the connected Wi-Fi, so first boot has network for
+	# the OOBE's downloads. Everything else — account, hostname, desktop, DM, timezone — is asked
+	# FRESH by the first-boot OOBE. No answers are written here; the absence of an oobe_done marker
+	# (in /peacock/etc/oobe/answers.toml, created by the OOBE) is what triggers first-boot setup.
+	# The installed flavor is already recorded in /peacock/etc/active-flavor (above).
 	mkdir -p "$TARGET_MNT/peacock/etc/network"
-	[ -f /tmp/prp-wpa.conf ]      && cp /tmp/prp-wpa.conf "$TARGET_MNT/peacock/etc/network/wpa.conf" 2>/dev/null || true
-	[ -f /etc/prp/wifi-country ]  && cp /etc/prp/wifi-country "$TARGET_MNT/peacock/etc/network/wifi-country" 2>/dev/null || true
+	[ -f /tmp/prp-wpa.conf ]     && cp /tmp/prp-wpa.conf "$TARGET_MNT/peacock/etc/network/wpa.conf" 2>/dev/null || true
+	[ -f /etc/prp/wifi-country ] && cp /etc/prp/wifi-country "$TARGET_MNT/peacock/etc/network/wifi-country" 2>/dev/null || true
 	[ -f "$TARGET_MNT/peacock/etc/network/wpa.conf" ] && log "saved Wi-Fi credentials to the base"
 
 	sync

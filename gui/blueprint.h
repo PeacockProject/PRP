@@ -56,6 +56,12 @@ typedef struct {
 int bp_fetch_verify(const char *url, const char *pubkey_path, const char *out_path,
                     char *err, size_t errsz);
 
+/* Fetch + verify <base_url>/index.toml and write the available flavors (one per line, lv_dropdown
+ * format) into `out`. The flavor list is thus served from genmirror — adding a flavor needs no
+ * client rebuild. Returns the flavor count, or -1 on failure. */
+int bp_fetch_flavors(const char *base_url, const char *pubkey_path, char *out, size_t outcap,
+                     char *err, size_t errsz);
+
 /* ---- blueprint load/free ---- */
 /* Parse a blueprint TOML. Returns NULL on error with errbuf filled. */
 bp_blueprint *bp_load(const char *path, char *errbuf, size_t errbufsz);
