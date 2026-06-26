@@ -85,6 +85,8 @@ if [[ -f "$OUT_BIN" \
   && "$OUT_BIN" -nt "$PRP_ROOT/gui/prp_ui.h" \
   && "$OUT_BIN" -nt "$PRP_ROOT/gui/prp_wizard.c" \
   && "$OUT_BIN" -nt "$PRP_ROOT/gui/prp_wizard.h" \
+  && "$OUT_BIN" -nt "$PRP_ROOT/gui/blueprint.c" \
+  && "$OUT_BIN" -nt "$PRP_ROOT/gui/blueprint.h" \
   && "$OUT_BIN" -nt "$PRP_ROOT/gui/prp_net_ui.c" \
   && "$OUT_BIN" -nt "$PRP_ROOT/gui/prp_net_ui.h" \
   && "$OUT_BIN" -nt "$PRP_ROOT/gui/prp_theme.h" \
@@ -139,6 +141,8 @@ SRCS=(
   "$PRP_ROOT/gui/fonts/pk_mono_20.c"
   "$PRP_ROOT/gui/fonts/pk_mono_26.c"
   "$PRP_ROOT/gui/prp_ui.c"
+  "$PRP_ROOT/gui/blueprint.c"
+  "$PRP_ROOT/gui/toml.c"
   "$PRP_ROOT/gui/prp_wizard.c"
   "$PRP_ROOT/gui/prp_net_ui.c"
   "$PRP_ROOT/gui/prp_gui.c"
