@@ -2,6 +2,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "blueprint.h"
 #include "toml.h"
+#include "bp_verify.h"
 
 #include <regex.h>
 #include <stdio.h>
@@ -412,4 +413,32 @@ int bp_run_stage_action(const bp_stage *st, const bp_answers *a, const char *roo
 	int status = 0;
 	waitpid(pid, &status, 0);
 	return (WIFEXITED(status) && WEXITSTATUS(status) == 0) ? 0 : -1;
+}
+
+/* ---- fetch + verify (curl/wget; feather not involved) ---- */
+static int fetch_url(const char *url, const char *out) {
+	pid_t pid = fork();
+	if (pid == 0) {
+		execlp("curl", "curl", "-fsSL", "--retry", "2", "-o", out, url, (char *)NULL);
+		execlp("wget", "wget", "-q", "-O", out, url, (char *)NULL);
+		_exit(127);
+	}
+	if (pid < 0) return -1;
+	int st = 0;
+	waitpid(pid, &st, 0);
+	return (WIFEXITED(st) && WEXITSTATUS(st) == 0) ? 0 : -1;
+}
+
+int bp_fetch_verify(const char *url, const char *pubkey_path, const char *out_path,
+                    char *err, size_t errsz) {
+	char sigurl[1024], sigout[1024];
+	snprintf(sigurl, sizeof sigurl, "%s.sig", url);
+	snprintf(sigout, sizeof sigout, "%s.sig", out_path);
+	if (fetch_url(url, out_path) != 0) { snprintf(err, errsz, "fetch failed: %s", url); return -1; }
+	if (fetch_url(sigurl, sigout) != 0) { snprintf(err, errsz, "fetch failed: %s", sigurl); return -1; }
+	if (bp_verify_file(out_path, sigout, pubkey_path, err, errsz) != 0) {
+		remove(out_path); /* never leave an unverified blueprint on disk */
+		return -1;
+	}
+	return 0;
 }

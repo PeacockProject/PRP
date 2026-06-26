@@ -50,6 +50,12 @@ typedef struct {
 	size_t n_stages;
 } bp_blueprint;
 
+/* ---- fetch + verify (feather NOT involved — it stays a package manager) ----
+ * Download `url` (and `url`.sig) via curl/wget to `out_path`, then verify the minisign signature
+ * against `pubkey_path` in-process (bp_verify). Returns 0 only on a verified download. */
+int bp_fetch_verify(const char *url, const char *pubkey_path, const char *out_path,
+                    char *err, size_t errsz);
+
 /* ---- blueprint load/free ---- */
 /* Parse a blueprint TOML. Returns NULL on error with errbuf filled. */
 bp_blueprint *bp_load(const char *path, char *errbuf, size_t errbufsz);
