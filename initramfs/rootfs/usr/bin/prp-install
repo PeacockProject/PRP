@@ -355,6 +355,20 @@ EOF
 		ln -sf /usr/bin/busybox "$TARGET_MNT/bin/sh"
 	[ -e "$TARGET_MNT/sbin/peacock-init" ] && [ ! -e "$TARGET_MNT/sbin/init" ] && \
 		ln -sf peacock-init "$TARGET_MNT/sbin/init"
+	# Link busybox applets that have no real binary, so ls/grep/ip/sed/wget/... resolve on the
+	# booted base. Runs now that the FULL base is installed, so util-linux's real mount/umount/
+	# sfdisk/etc. already exist and are skipped (the helper guards on existence). PRP + target are
+	# the same arch, so chroot-exec of the target's busybox works.
+	if [ -x "$TARGET_MNT/usr/sbin/peacock-busybox-links" ] && command -v chroot >/dev/null 2>&1; then
+		chroot "$TARGET_MNT" /usr/sbin/peacock-busybox-links 2>/dev/null \
+			|| log "WARN: busybox applet linking failed"
+	fi
+	# depmod so the base's modprobe can resolve wifi module deps (wcn36xx -> mac80211/cfg80211)
+	# and wlan0 comes up. Mirrors PRP's own assemble-rootfs-feather.sh. Modules live at /lib/modules.
+	KVER="$(ls "$TARGET_MNT/lib/modules" 2>/dev/null | head -1)"
+	if [ -n "$KVER" ] && command -v depmod >/dev/null 2>&1; then
+		depmod -b "$TARGET_MNT" "$KVER" 2>/dev/null || log "WARN: depmod failed (modprobe may need explicit paths)"
+	fi
 	progress 70
 fi
 
