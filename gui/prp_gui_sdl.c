@@ -192,6 +192,8 @@ int main(int argc, char **argv) {
     g_wiz.dms = "None\nSDDM\nLightDM\ngreetd\nGDM\nly";
     g_wiz.disks = "Internal storage (sda)";
     g_wiz.wifi_ssids = "PeacockNet\nHome Wi-Fi 5G\nguest\n(other…)";
+    /* Set PRP_BLUEPRINT=peacock-ports/blueprints/arch.toml to exercise the blueprint-driven flow. */
+    g_wiz.blueprint_path = getenv("PRP_BLUEPRINT");
     cfg.on_install = launch_wizard;
     cfg.on_network = launch_network;
     prp_ui_build(&cfg);

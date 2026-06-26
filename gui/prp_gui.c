@@ -722,6 +722,8 @@ int main(int argc, char **argv) {
     g_wiz.dms = "None\nSDDM\nLightDM\ngreetd\nGDM\nly";
     g_wiz.disks = enumerate_install_targets();   /* real partitions via prp-targets */
     g_wiz.wifi_ssids = "(Wi-Fi scan coming soon)";   /* prp-net wires real scanning */
+    /* Bundled default blueprint; P3 fetches the per-flavor one from genmirror + reloads. */
+    g_wiz.blueprint_path = "/usr/share/peacock/blueprints/default.toml";
     ui_cfg.on_install = launch_wizard;
     ui_cfg.on_network = launch_network;
     prp_ui_build(&ui_cfg);

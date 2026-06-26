@@ -21,6 +21,9 @@ typedef struct {
     const char *dms;              // "None\nSDDM\nLightDM\n..."
     const char *disks;            // target disks, e.g. "Internal storage (mmcblk0)"
     const char *wifi_ssids;       // mock scan results (newline-separated) until prp-net lands
+    const char *blueprint_path;   // flavor blueprint TOML to render Options from (NULL = none).
+                                  // P3 fetches per-flavor from genmirror; a bundled default ships
+                                  // in PRP; the SDL sim points at a local sample.
 } prp_wizard_cfg_t;
 
 // Launch the wizard as a full-screen overlay on the active screen.
