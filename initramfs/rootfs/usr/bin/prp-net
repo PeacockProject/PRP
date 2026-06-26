@@ -170,6 +170,9 @@ cmd_connect() {
 		|| dhcpcd "$iface" >/dev/null 2>&1 || true
 	ip=$(ip -4 addr show "$iface" 2>/dev/null | sed -n 's/.*inet \([0-9.]*\).*/\1/p' | head -1)
 	if [ -n "$ip" ]; then
+		# Persist the network block (ssid/psk/country) into WPA_CONF so the installer can hand it
+		# to the base (update_config=1 makes save_config write the creds). Best-effort.
+		wpa_cli -i "$iface" save_config >/dev/null 2>&1 || true
 		echo "ok $ip" >"$STATUS_OUT"; log "connected $ip"; return 0
 	fi
 	# Associated but no DHCP lease. On a 5GHz channel with no regulatory country
