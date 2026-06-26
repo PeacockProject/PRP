@@ -11,8 +11,6 @@
 # real util-linux sfdisk (busybox's is a broken shim).
 set -u
 
-DISK="${PRP_BOOT_DISK:-/dev/mmcblk0}"
-
 find_sfdisk() {
 	for c in /sbin/sfdisk /usr/sbin/sfdisk /bin/sfdisk \
 		/mnt/prp_rootfs/sbin/sfdisk /mnt/prp_rootfs/usr/sbin/sfdisk; do
@@ -24,7 +22,29 @@ find_sfdisk() {
 }
 SFDISK="$(find_sfdisk || true)"
 [ -n "$SFDISK" ] || exit 1
-[ -b "$DISK" ] || exit 1
+
+# Detect the eMMC: an explicit $PRP_BOOT_DISK wins; otherwise pick the whole-disk
+# node whose GPT carries the Android layout (a boot/boot_a/misc partition). MMC
+# index ordering (mmcblk0 vs mmcblk1 vs ...) is NOT stable across boots on msm8953
+# — the eMMC was mmcblk0 one boot and mmcblk1 the next — so hardcoding mmcblk0
+# breaks intermittently. The nested install loop (peacock_boot/peacock_root) and
+# SD cards won't match the Android boot names, so they're skipped naturally.
+detect_disk() {
+	if [ -n "${PRP_BOOT_DISK:-}" ] && [ -b "$PRP_BOOT_DISK" ]; then
+		printf '%s\n' "$PRP_BOOT_DISK"
+		return 0
+	fi
+	for d in /dev/mmcblk0 /dev/mmcblk1 /dev/mmcblk2 /dev/sda /dev/sdb; do
+		[ -b "$d" ] || continue
+		if "$SFDISK" -d "$d" 2>/dev/null | grep -qiE 'name="(boot|boot_a|boot_b|misc)"'; then
+			printf '%s\n' "$d"
+			return 0
+		fi
+	done
+	return 1
+}
+DISK="$(detect_disk || true)"
+[ -n "$DISK" ] || exit 1
 
 # gpt_dev <gpt-name> -> /dev path of the partition with that exact GPT name.
 gpt_dev() {
