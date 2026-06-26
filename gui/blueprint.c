@@ -62,8 +62,14 @@ bp_blueprint *bp_load(const char *path, char *errbuf, size_t errbufsz) {
 	bp_blueprint *bp = calloc(1, sizeof *bp);
 	toml_datum_t sd = toml_int_in(root, "schema");
 	bp->schema = sd.ok ? (int)sd.u.i : 0;
+	bp->kind   = tstr(root, "kind");
 	bp->flavor = tstr(root, "flavor");
 	bp->title  = tstr(root, "title");
+	toml_table_t *arch = toml_table_in(root, "archive");
+	if (arch) {
+		bp->archive_url    = tstr(arch, "url");
+		bp->archive_sha256 = tstr(arch, "sha256");
+	}
 
 	toml_array_t *stages = toml_array_in(root, "stage");
 	if (stages) {
@@ -73,13 +79,18 @@ bp_blueprint *bp_load(const char *path, char *errbuf, size_t errbufsz) {
 			toml_table_t *stab = toml_table_at(stages, i);
 			if (!stab) continue;
 			bp_stage *s = &bp->stages[bp->n_stages++];
-			s->id    = tstr(stab, "id");
-			s->title = tstr(stab, "title");
-			s->when  = tstr(stab, "when");
+			s->id          = tstr(stab, "id");
+			s->title       = tstr(stab, "title");
+			s->description = tstr(stab, "description");
+			s->when        = tstr(stab, "when");
 			s->action        = tstr(stab, "action");
 			s->action_script = tstr(stab, "action_script");
+			if (!s->action_script) s->action_script = tstr(stab, "script"); /* declarative form */
 			char *ph = tstr(stab, "phase");
-			s->phase = (ph && !strcmp(ph, "install")) ? BP_PHASE_INSTALL : BP_PHASE_OOBE;
+			if (ph)
+				s->phase = !strcmp(ph, "install") ? BP_PHASE_INSTALL : BP_PHASE_OOBE;
+			else /* default from the blueprint's kind */
+				s->phase = (bp->kind && !strcmp(bp->kind, "install")) ? BP_PHASE_INSTALL : BP_PHASE_OOBE;
 			free(ph);
 
 			toml_array_t *req = toml_array_in(stab, "requires");
@@ -125,7 +136,8 @@ void bp_free(bp_blueprint *bp) {
 	if (!bp) return;
 	for (size_t i = 0; i < bp->n_stages; i++) {
 		bp_stage *s = &bp->stages[i];
-		free(s->id); free(s->title); free(s->when); free(s->action); free(s->action_script);
+		free(s->id); free(s->title); free(s->description); free(s->when);
+		free(s->action); free(s->action_script);
 		for (size_t j = 0; j < s->n_requires; j++) free(s->requires[j]);
 		free(s->requires);
 		for (size_t j = 0; j < s->n_fields; j++) {
@@ -135,7 +147,8 @@ void bp_free(bp_blueprint *bp) {
 		}
 		free(s->fields);
 	}
-	free(bp->stages); free(bp->flavor); free(bp->title); free(bp);
+	free(bp->stages); free(bp->kind); free(bp->flavor); free(bp->title);
+	free(bp->archive_url); free(bp->archive_sha256); free(bp);
 }
 
 /* ---- phase ordering (stable topo sort by `requires`) ---- */

@@ -33,19 +33,28 @@ typedef struct {
 	char *id;
 	bp_phase phase;
 	char *title;
+	char *description;   /* step description text shown in the UI; else NULL */
 	char *when;          /* stage show-if; else NULL */
 	char **requires;     /* stage ids that must be done first */
 	size_t n_requires;
 	bp_field *fields;
 	size_t n_fields;
+	/* The TOML is declarative: a stage names a `script` (a .sh shipped in the flavor folder,
+	 * fetched + minisign-verified, then run) rather than inlining shell. `action` (inline) is
+	 * still accepted for trivial steps. `script` is stored here as action_script. */
 	char *action;        /* inline POSIX sh; else NULL */
-	char *action_script; /* relative path (fetched+verified separately); else NULL */
+	char *action_script; /* script filename, relative to the flavor folder; else NULL */
 } bp_stage;
 
 typedef struct {
 	int schema;
+	char *kind;          /* "install" | "oobe" */
 	char *flavor;
 	char *title;
+	/* [archive] — a downloadable flavor tarball + its digest (for install blueprints). The TOML is
+	 * signed, so the digest is trusted: the download is verified against it before extraction. */
+	char *archive_url;
+	char *archive_sha256;
 	bp_stage *stages;
 	size_t n_stages;
 } bp_blueprint;
