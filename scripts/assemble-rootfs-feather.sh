@@ -192,6 +192,12 @@ printf '[[repos]]\nname = "%s"\nurl = "%s/%s/%s"\npubkey = "%s"\n' \
   >"$STAGE/etc/feather/feather.conf"
 echo "assemble: feather.conf -> $GENMIRROR_URL/$GENMIRROR_CHANNEL/$ARCH"
 
+# Blueprint base URL for the installer wizard + first-boot OOBE to fetch per-flavor blueprints
+# (separate from the package repo; not a feather concern). Same genmirror, blueprints/ folder.
+mkdir -p "$STAGE/etc/peacock"
+printf '%s/blueprints/%s\n' "$GENMIRROR_URL" "$GENMIRROR_CHANNEL" >"$STAGE/etc/peacock/blueprints-base"
+echo "assemble: blueprints-base -> $GENMIRROR_URL/blueprints/$GENMIRROR_CHANNEL"
+
 # On-device /etc/prp/device.conf: boot params for prp-install-bootloader,
 # templated from the device profile so the flasher isn't hardcoded.
 echo "assemble: writing on-device /etc/prp/device.conf (boot params) …"

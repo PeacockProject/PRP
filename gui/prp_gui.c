@@ -722,8 +722,22 @@ int main(int argc, char **argv) {
     g_wiz.dms = "None\nSDDM\nLightDM\ngreetd\nGDM\nly";
     g_wiz.disks = enumerate_install_targets();   /* real partitions via prp-targets */
     g_wiz.wifi_ssids = "(Wi-Fi scan coming soon)";   /* prp-net wires real scanning */
-    /* Bundled default blueprint; P3 fetches the per-flavor one from genmirror + reloads. */
+    /* Bundled fallback blueprint; the wizard prefers a live, verified one from genmirror. */
     g_wiz.blueprint_path = "/usr/share/peacock/blueprints/default.toml";
+    g_wiz.blueprint_pubkey = "/etc/feather/genmirror.pub";
+    {
+        /* genmirror blueprints base URL, written by assemble at /etc/peacock/blueprints-base
+         * (never hardcoded here). Absent (e.g. odd builds) → wizard uses the bundle. */
+        static char bp_base[256];
+        FILE *bf = fopen("/etc/peacock/blueprints-base", "r");
+        if(bf) {
+            if(fgets(bp_base, sizeof bp_base, bf)) {
+                bp_base[strcspn(bp_base, "\r\n")] = '\0';
+                if(bp_base[0]) g_wiz.blueprint_base_url = bp_base;
+            }
+            fclose(bf);
+        }
+    }
     ui_cfg.on_install = launch_wizard;
     ui_cfg.on_network = launch_network;
     prp_ui_build(&ui_cfg);

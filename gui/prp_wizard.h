@@ -21,9 +21,12 @@ typedef struct {
     const char *dms;              // "None\nSDDM\nLightDM\n..."
     const char *disks;            // target disks, e.g. "Internal storage (mmcblk0)"
     const char *wifi_ssids;       // mock scan results (newline-separated) until prp-net lands
-    const char *blueprint_path;   // flavor blueprint TOML to render Options from (NULL = none).
-                                  // P3 fetches per-flavor from genmirror; a bundled default ships
-                                  // in PRP; the SDL sim points at a local sample.
+    const char *blueprint_path;   // bundled fallback blueprint TOML (rendered if no live fetch).
+    const char *blueprint_base_url; // genmirror blueprints base, e.g. ".../blueprints/stable".
+                                  // When set, the wizard fetches <base>/<flavor>.toml (verified)
+                                  // and renders that instead of the bundle — keeping flavor setup
+                                  // decoupled from the recovery image. NULL = use the bundle.
+    const char *blueprint_pubkey; // trust anchor for the fetched blueprint (genmirror.pub).
 } prp_wizard_cfg_t;
 
 // Launch the wizard as a full-screen overlay on the active screen.

@@ -4,6 +4,7 @@
 // falls back to a timer-driven mock so the flow stays exercisable. Styling from
 // prp_theme.h; type from the pk_* fonts.
 
+#include <ctype.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -620,12 +621,25 @@ void prp_wizard_show(const prp_wizard_cfg_t *cfg) {
     if(W.ans) { bp_answers_free(W.ans); W.ans = NULL; }
     memset(&W, 0, sizeof(W));
     W.cfg = *cfg;
-    /* Load the flavor blueprint if provided (P3 fetches it from genmirror; the SDL sim points at a
-     * local sample). With none, the wizard keeps its hardcoded Options (fallback, no regression). */
-    if(cfg->blueprint_path && *cfg->blueprint_path) {
+    /* Prefer a live, verified blueprint fetched from genmirror for the default flavor (keeps flavor
+     * setup decoupled from the recovery image); fall back to the bundled one. */
+    const char *bp_path = cfg->blueprint_path;
+    if(cfg->blueprint_base_url && *cfg->blueprint_base_url && cfg->blueprint_pubkey) {
+        char flav[32] = "arch";
+        if(cfg->flavors && *cfg->flavors) {
+            snprintf(flav, sizeof flav, "%s", cfg->flavors);
+            char *nl = strchr(flav, '\n'); if(nl) *nl = '\0';
+            for(char *p = flav; *p; p++) *p = (char)tolower((unsigned char)*p);
+        }
+        char url[512], err[256];
+        snprintf(url, sizeof url, "%s/%s.toml", cfg->blueprint_base_url, flav);
+        if(bp_fetch_verify(url, cfg->blueprint_pubkey, "/tmp/prp-blueprint.toml", err, sizeof err) == 0)
+            bp_path = "/tmp/prp-blueprint.toml";
+    }
+    if(bp_path && *bp_path) {
         char err[256];
-        W.bp = bp_load(cfg->blueprint_path, err, sizeof err);
-        W.ans = bp_answers_load(""); /* empty store; persisted to the target at install (P3) */
+        W.bp = bp_load(bp_path, err, sizeof err);
+        W.ans = bp_answers_load(""); /* empty store; persisted to the target at install */
     }
     const int w = cfg->screen_w, h = cfg->screen_h;
     const int scale = clampi(cfg->scale_pct, 50, 200);
