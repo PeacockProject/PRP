@@ -15,18 +15,15 @@ typedef struct {
     int scale_pct;
     const char *device_name;      // auto-detected, e.g. "Xiaomi Mi A2 Lite"
     const char *device_codename;  // e.g. "daisy"
-    const char *flavors;          // "Arch\nDebian\nAlpine"
+    const char *flavors;          // fallback flavor list if the index fetch fails ("Arch\n...")
     const char *inits;            // "systemd\nOpenRC"
-    const char *desktops;         // "None\nXFCE\nKDE Plasma\n..."
-    const char *dms;              // "None\nSDDM\nLightDM\n..."
     const char *disks;            // target disks, e.g. "Internal storage (mmcblk0)"
     const char *wifi_ssids;       // mock scan results (newline-separated) until prp-net lands
-    const char *blueprint_path;   // bundled fallback blueprint TOML (rendered if no live fetch).
+    // Desktop/login-manager/account/timezone are NOT asked here — they're first-boot OOBE.
     const char *blueprint_base_url; // genmirror blueprints base, e.g. ".../blueprints/stable".
-                                  // When set, the wizard fetches <base>/<flavor>.toml (verified)
-                                  // and renders that instead of the bundle — keeping flavor setup
-                                  // decoupled from the recovery image. NULL = use the bundle.
-    const char *blueprint_pubkey; // trust anchor for the fetched blueprint (genmirror.pub).
+                                  // The wizard fetches <base>/index.toml (verified) for the flavor
+                                  // list, so adding a flavor needs no PRP rebuild.
+    const char *blueprint_pubkey; // trust anchor for the fetched index (genmirror.pub).
 } prp_wizard_cfg_t;
 
 // Launch the wizard as a full-screen overlay on the active screen.

@@ -41,8 +41,7 @@ static struct {
     lv_obj_t *bar, *log;
 
     // captured choices
-    char flavor[32], init_s[32], desktop[32], dm[32], disk[64];
-    char user[64], pass[64], host[64], wifi[64];
+    char flavor[32], init_s[32], disk[64], wifi[64];
     bool net_ok;
     char flavors_buf[512];   // flavor list fetched from the genmirror blueprint index (cached)
 
@@ -392,10 +391,9 @@ static void start_real_install(void) {
     if(pid == 0) {
         dup2(fds[1], 1); dup2(fds[1], 2);
         close(fds[0]); close(fds[1]);
+        /* PRP only installs the base + flavor; account/desktop/etc. are first-boot OOBE. */
         execlp("prp-install", "prp-install",
-               "--flavor", W.flavor, "--init", W.init_s, "--desktop", W.desktop,
-               "--dm", W.dm, "--user", W.user, "--pass", W.pass,
-               "--host", W.host, "--disk", W.disk, (char *)NULL);
+               "--flavor", W.flavor, "--init", W.init_s, "--disk", W.disk, (char *)NULL);
         _exit(127);
     }
     close(fds[1]);

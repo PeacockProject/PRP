@@ -188,12 +188,11 @@ int main(int argc, char **argv) {
     g_wiz.device_codename = "qemu-x86_64";
     g_wiz.flavors = "Arch\nDebian\nAlpine";
     g_wiz.inits = "systemd\nOpenRC";
-    g_wiz.desktops = "None\nXFCE\nKDE Plasma\nGNOME\nMATE\nCinnamon\nLXQt";
-    g_wiz.dms = "None\nSDDM\nLightDM\ngreetd\nGDM\nly";
     g_wiz.disks = "Internal storage (sda)";
     g_wiz.wifi_ssids = "PeacockNet\nHome Wi-Fi 5G\nguest\n(other…)";
-    /* Set PRP_BLUEPRINT=peacock-ports/blueprints/arch.toml to exercise the blueprint-driven flow. */
-    g_wiz.blueprint_path = getenv("PRP_BLUEPRINT");
+    /* Set PRP_BP_BASE + PRP_BP_PUBKEY to exercise the live flavor-index fetch in the sim. */
+    g_wiz.blueprint_base_url = getenv("PRP_BP_BASE");
+    g_wiz.blueprint_pubkey = getenv("PRP_BP_PUBKEY");
     cfg.on_install = launch_wizard;
     cfg.on_network = launch_network;
     prp_ui_build(&cfg);
