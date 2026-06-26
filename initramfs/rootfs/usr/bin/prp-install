@@ -314,14 +314,23 @@ else
 		$BASE_PKGS || fail "base package install failed (see log)."
 	progress 50
 
-	# 4b. The distro flavor as a guest under /flavors/<flavor>. layout=system, so
-	#     the prebuilt distro rootfs overlays this root verbatim. Same target db.
-	log "installing flavor base $FLAVOR_PKG into /flavors/$FLAVOR_SLUG"
+	# 4b. The distro flavor base via its install blueprint. peacock-base pulled peacock-oobe into
+	#     the target, and PRP is the same arch, so run it to fetch+verify the flavor's base rootfs
+	#     tarball (e.g. Arch Linux ARM) and lay it down under /flavors/<flavor>. Single source with
+	#     the first-boot OOBE — adding/retargeting a flavor is a genmirror change, no PRP rebuild.
+	log "laying down flavor base $FLAVOR_SLUG via its install blueprint"
 	mkdir -p "$FLAVOR_ROOT"
-	ftr install --root "$FLAVOR_ROOT" --arch "$ARCH" \
-		"$FLAVOR_PKG" || fail "flavor base install failed - is $FLAVOR_PKG published for $ARCH?"
-	# Bake the peacock guest-glue (flavor-ready signal) so peacock-init can
-	# supervise this flavor's boot.
+	OOBE_BIN="$TARGET_MNT/sbin/peacock-oobe"
+	[ -x "$OOBE_BIN" ] || fail "peacock-oobe missing from the base install ($OOBE_BIN)"
+	BP_BASE="$(cat /etc/peacock/blueprints-base 2>/dev/null || echo https://genmirror.peacockos.org/blueprints/stable)/$FLAVOR_SLUG"
+	# Stage the (large) base tarball on the target DISK, not PRP's RAM tmpfs, to avoid OOM.
+	mkdir -p "$TARGET_MNT/var/tmp"
+	BP_WORK="$TARGET_MNT/var/tmp" "$OOBE_BIN" --apply --kind install \
+		--base "$BP_BASE" --pubkey /etc/feather/genmirror.pub \
+		--root "$TARGET_MNT" \
+		--set flavor="$FLAVOR_SLUG" --set arch="$ARCH" --set target="$TARGET_MNT" \
+		|| fail "flavor base blueprint failed (network? digest mismatch?)."
+	# Bake the peacock guest-glue (flavor-ready signal) so peacock-init can supervise boot.
 	apply_flavor_glue "$FLAVOR_ROOT"
 	progress 66
 
