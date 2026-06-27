@@ -289,6 +289,16 @@ else
 	mkdir -p "$FTR_DB_ROOT"
 	ftr sync || fail "ftr sync into target db failed."
 
+	# PRP knows its target at compile time (DEVICE_CODENAME, baked into device.conf). Confirm the
+	# device metapackage is actually published in the synced index BEFORE installing, and fail loudly
+	# if it isn't — better than silently installing a base with no kernel/firmware/bootloader. Its
+	# depends then pull the whole device set (linux-<codename>, firmware-<codename>, bootloader).
+	if [ -n "${DEVICE_CODENAME:-}" ]; then
+		ftr info "device-${DEVICE_CODENAME}" >/dev/null 2>&1 \
+			|| fail "device package 'device-${DEVICE_CODENAME}' is not in the repo index — this device may be unsupported or not yet published. Aborting before install."
+		log "device package device-${DEVICE_CODENAME} found; its deps pull the kernel + firmware"
+	fi
+
 	# Resolve the active-slot boot partition so the bootloader package's
 	# post-install hook (lk2nd / minkernel, pulled in by device-<codename>)
 	# flashes itself there. Empty -> the hook no-ops (image staged, nothing
