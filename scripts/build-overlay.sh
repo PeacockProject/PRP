@@ -155,6 +155,8 @@ for app in \
   vi less more \
   ip ifconfig route netstat ping ping6 nslookup \
   tar gzip gunzip zcat unzip \
+  xz unxz xzcat \
+  chroot \
   dd \
   nc telnet telnetd tcpsvd \
   fdisk sfdisk lsblk \
