@@ -134,6 +134,12 @@ SRCS=(
   "$PRP_ROOT/gui/fonts/pk_mono_20.c"
   "$PRP_ROOT/gui/fonts/pk_mono_26.c"
   "$PRP_ROOT/gui/prp_ui.c"
+  # The blueprint engine: the wizard fetches its flavor list from the genmirror blueprint index
+  # (bp_fetch_flavors), so the host sim needs these too or it fails to link. Mirrors build-gui.sh.
+  "$PRP_ROOT/gui/blueprint.c"
+  "$PRP_ROOT/gui/toml.c"
+  "$PRP_ROOT/gui/bp_verify.c"
+  "$PRP_ROOT/gui/tweetnacl.c"
   "$PRP_ROOT/gui/prp_wizard.c"
   "$PRP_ROOT/gui/prp_net_ui.c"
   "$PRP_ROOT/gui/prp_gui_sdl.c"

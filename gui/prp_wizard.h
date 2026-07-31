@@ -16,7 +16,6 @@ typedef struct {
     const char *device_name;      // auto-detected, e.g. "Xiaomi Mi A2 Lite"
     const char *device_codename;  // e.g. "daisy"
     const char *flavors;          // fallback flavor list if the index fetch fails ("Arch\n...")
-    const char *inits;            // "systemd\nOpenRC"
     const char *disks;            // target disks, e.g. "Internal storage (mmcblk0)"
     const char *wifi_ssids;       // mock scan results (newline-separated) until prp-net lands
     // Desktop/login-manager/account/timezone are NOT asked here — they're first-boot OOBE.

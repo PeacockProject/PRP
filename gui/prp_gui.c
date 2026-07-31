@@ -717,7 +717,6 @@ int main(int argc, char **argv) {
     g_wiz.device_name = "this device";
     g_wiz.device_codename = "";
     g_wiz.flavors = "Arch\nDebian\nAlpine";
-    g_wiz.inits = "systemd\nOpenRC";
     g_wiz.disks = enumerate_install_targets();   /* real partitions via prp-targets */
     g_wiz.wifi_ssids = "(Wi-Fi scan coming soon)";   /* prp-net wires real scanning */
     /* The wizard fetches the flavor list from genmirror's blueprint index (verified). */

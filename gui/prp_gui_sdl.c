@@ -187,7 +187,6 @@ int main(int argc, char **argv) {
     g_wiz.device_name = "QEMU x86_64";
     g_wiz.device_codename = "qemu-x86_64";
     g_wiz.flavors = "Arch\nDebian\nAlpine";
-    g_wiz.inits = "systemd\nOpenRC";
     g_wiz.disks = "Internal storage (sda)";
     g_wiz.wifi_ssids = "PeacockNet\nHome Wi-Fi 5G\nguest\n(other…)";
     /* Set PRP_BP_BASE + PRP_BP_PUBKEY to exercise the live flavor-index fetch in the sim. */

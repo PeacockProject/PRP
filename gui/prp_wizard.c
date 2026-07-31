@@ -36,12 +36,12 @@ static struct {
     lv_obj_t *root, *title, *stepind, *content, *footer, *back, *back_lbl, *next, *next_lbl, *kb;
 
     // live widgets for the current step (read on Next, then content is cleaned)
-    lv_obj_t *dd_flavor, *dd_init, *dd_desktop, *dd_dm, *dd_disk, *dd_ssid;
+    lv_obj_t *dd_flavor, *dd_desktop, *dd_dm, *dd_disk, *dd_ssid;
     lv_obj_t *ta_user, *ta_pass, *ta_host, *ta_psk;
     lv_obj_t *bar, *log;
 
     // captured choices
-    char flavor[32], init_s[32], disk[64], wifi[64];
+    char flavor[32], disk[64], wifi[64];
     bool net_ok;
     char flavors_buf[512];   // flavor list fetched from the genmirror blueprint index (cached)
 
@@ -219,9 +219,10 @@ static void render_options(void) {
     mk_label(W.content, "Set it up", W.f_title, PK_CREAM);
 
     /* PRP asks ONLY what the install itself needs: the flavor (list fetched from the genmirror
-     * blueprints), the base init system, and the target disk. Account, hostname, desktop, login
-     * manager and timezone are all asked FRESH by the first-boot OOBE — driven by the flavor's
-     * blueprint — so they are deliberately not here. */
+     * blueprints) and the target disk. There is deliberately NO init-system question: the base
+     * runs no service manager (peacock-init IS PID 1) and the flavor's own init is autodetected.
+     * Account, hostname, desktop, login manager and timezone are all asked FRESH by the first-boot
+     * OOBE — driven by the flavor's blueprint — so they are deliberately not here. */
     /* Fetch the flavor list from genmirror's blueprint index now that the network step is done —
      * so adding a flavor never needs a PRP rebuild. Cached after the first fetch; on failure (or
      * no base URL) falls back to the built-in cfg.flavors. */
@@ -235,7 +236,6 @@ static void render_options(void) {
         if(W.flavors_buf[0]) flavors = W.flavors_buf;
     }
     W.dd_flavor = mk_dropdown("FLAVOR", flavors);
-    W.dd_init   = mk_dropdown("INIT SYSTEM", W.cfg.inits);
     W.dd_disk   = mk_dropdown("INSTALL TO", W.cfg.disks);
 }
 
@@ -264,7 +264,6 @@ static void render_confirm(void) {
     snprintf(net, sizeof(net), W.net_ok ? "Wi-Fi: %s" : "%s", W.net_ok ? W.wifi : "Wired / continue");
     summary_row("NETWORK", net);
     summary_row("FLAVOR", W.flavor);
-    summary_row("INIT", W.init_s);
     summary_row("INSTALL TO", W.disk);
     summary_row("FIRST BOOT", "Account, desktop + timezone set up on first boot");
 }
@@ -393,7 +392,7 @@ static void start_real_install(void) {
         close(fds[0]); close(fds[1]);
         /* PRP only installs the base + flavor; account/desktop/etc. are first-boot OOBE. */
         execlp("prp-install", "prp-install",
-               "--flavor", W.flavor, "--init", W.init_s, "--disk", W.disk, (char *)NULL);
+               "--flavor", W.flavor, "--disk", W.disk, (char *)NULL);
         _exit(127);
     }
     close(fds[1]);
@@ -485,7 +484,6 @@ static int capture_step(void) {
         snprintf(W.wifi, sizeof(W.wifi), "%s", prp_net_ui_status());
     } else if(W.step == ST_OPTIONS) {
         if(W.dd_flavor) lv_dropdown_get_selected_str(W.dd_flavor, W.flavor, sizeof(W.flavor));
-        if(W.dd_init)   lv_dropdown_get_selected_str(W.dd_init, W.init_s, sizeof(W.init_s));
         if(W.dd_disk)   lv_dropdown_get_selected_str(W.dd_disk, W.disk, sizeof(W.disk));
     }
     return 1;

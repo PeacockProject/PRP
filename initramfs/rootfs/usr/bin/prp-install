@@ -12,7 +12,7 @@
 #   ERROR <text>                 fatal failure (installer stops)
 #
 # Choices come from flags (mirroring the desktop builder):
-#   --flavor --init --desktop --dm --user --pass --host --disk
+#   --flavor --desktop --dm --user --pass --host --disk
 #   --dry-run   simulate every step (no formatting/installing) - used by the sim
 #               and for a safe "what will happen" run.
 #
@@ -21,8 +21,8 @@
 
 set -u
 
-# PRP asks only flavor + init + disk; account/hostname/desktop/DM/timezone are first-boot OOBE.
-FLAVOR=arch INIT=openrc DISK="" DRYRUN=0
+# PRP asks only flavor + disk; account/hostname/desktop/DM/timezone are first-boot OOBE.
+FLAVOR=arch DISK="" DRYRUN=0
 TARGET_MNT=/mnt/peacock-target
 ARCH="$(uname -m 2>/dev/null || echo aarch64)"
 case "$ARCH" in arm64) ARCH=aarch64 ;; esac
@@ -30,7 +30,9 @@ case "$ARCH" in arm64) ARCH=aarch64 ;; esac
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--flavor)  FLAVOR="$2"; shift 2 ;;
-		--init)    INIT="$2"; shift 2 ;;
+		# --init is retired: the base has no service manager (peacock-init IS PID 1) and the flavor's
+		# init is autodetected. Accepted-and-ignored so an older caller can't break the install.
+		--init)    shift 2 ;;
 		--disk)    DISK="$2"; shift 2 ;;
 		--arch)    ARCH="$2"; shift 2 ;;
 		--dry-run) DRYRUN=1; shift ;;
@@ -66,15 +68,17 @@ run() { if sim; then log "(dry-run) $*"; else "$@"; fi; }
 # under /flavors/<flavor>, entered by peacock-init at boot. All names resolve on
 # genmirror; feather pulls each dependency closure + GPG-verifies.
 #
-#   base_pkg_set    -> target /             peacock-base + device-<codename> + init-<init>
+#   base_pkg_set    -> target /             peacock-base + device-<codename>
 #   flavor_base_pkg -> target /flavors/<f>  flavor-<flavor>-base (prebuilt distro rootfs)
 #
-# Desktop/login-manager live INSIDE the flavor and aren't feather-packaged yet,
-# so they're deferred (the flavor base brings a console system up first).
+# NO init package goes into the base: peacock-init IS PID 1 and enters the flavor
+# directly, so the base runs no service manager (it mounts devtmpfs itself, so it
+# doesn't even need udev). The FLAVOR's init is autodetected at runtime by
+# peacock-init (flavorInitProfile) and at install time by apply_flavor_glue —
+# never imposed. Desktop/login-manager also live INSIDE the flavor.
 base_pkg_set() {
 	set -- peacock-base
 	[ -n "${DEVICE_CODENAME:-}" ] && set -- "$@" "device-${DEVICE_CODENAME}"
-	set -- "$@" "init-$(slug "$INIT")"
 	echo "$@"
 }
 flavor_base_pkg() { echo "flavor-$(slug "$FLAVOR")-base"; }
