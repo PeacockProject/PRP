@@ -102,13 +102,17 @@ resolve_target() {
 # Bake the peacock guest-glue into a flavor root: a "flavor-ready" unit/service
 # that touches /peacock/.flavor-ready once the flavor finishes booting. The base
 # supervisor (peacock-init, PID 1) watches that file to tell "booted OK" from
-# "hung" (-> PRP recovery). Init-aware: systemd flavors (Arch/Debian) get a
-# oneshot unit; openrc flavors (Artix/Alpine) get an init.d service. Mirrors the
-# builder's rootfs.go peacock-flavor-ready so on-device installs + images match.
+# "hung" (-> PRP recovery), so a flavor whose init we don't recognise here will
+# ALWAYS be declared hung after the 90s timeout. Init-aware: systemd flavors
+# (Arch/Debian/Fedora/openSUSE) get a oneshot unit; openrc (Artix/Alpine/Gentoo)
+# an init.d service; runit (Void) a supervised sv. Mirrors the builder's
+# rootfs.go peacock-flavor-ready so on-device installs + images match.
 # /peacock is bind-mounted into the flavor by peacock-init, so the path is live.
 apply_flavor_glue() {
 	froot="$1"
-	if [ -e "$froot/usr/lib/systemd/systemd" ]; then
+	# Check BOTH systemd paths — peacock-init's flavorInitProfile does, and a flavor that is
+	# systemd-shaped to the supervisor but not to us would silently get no ready signal.
+	if [ -e "$froot/usr/lib/systemd/systemd" ] || [ -e "$froot/lib/systemd/systemd" ]; then
 		log "flavor glue: systemd flavor-ready unit"
 		mkdir -p "$froot/etc/systemd/system/multi-user.target.wants"
 		cat > "$froot/etc/systemd/system/peacock-flavor-ready.service" <<'EOF'
@@ -137,8 +141,22 @@ EOF
 		chmod 755 "$froot/etc/init.d/peacock-flavor-ready"
 		ln -sf /etc/init.d/peacock-flavor-ready \
 			"$froot/etc/runlevels/default/peacock-flavor-ready"
+	elif [ -d "$froot/etc/runit" ] || [ -e "$froot/usr/bin/runsvdir" ] || [ -e "$froot/sbin/runit-init" ]; then
+		log "flavor glue: runit flavor-ready service"
+		mkdir -p "$froot/etc/sv/peacock-flavor-ready" "$froot/etc/runit/runsvdir/default"
+		# runit restarts any service whose run script exits, so signal once and then idle rather
+		# than churning. (`sleep infinity` isn't portable to busybox sleep — loop instead.)
+		cat > "$froot/etc/sv/peacock-flavor-ready/run" <<'EOF'
+#!/bin/sh
+exec 2>&1
+: > /peacock/.flavor-ready 2>/dev/null || true
+while :; do sleep 3600; done
+EOF
+		chmod 755 "$froot/etc/sv/peacock-flavor-ready/run"
+		ln -sf /etc/sv/peacock-flavor-ready \
+			"$froot/etc/runit/runsvdir/default/peacock-flavor-ready"
 	else
-		log "WARN: flavor glue: no systemd/openrc detected in $froot; flavor-ready signal NOT installed (flavor may look 'hung' to the base)"
+		log "WARN: flavor glue: no systemd/openrc/runit detected in $froot; flavor-ready signal NOT installed — the base will treat this flavor as hung after 90s and drop to recovery"
 	fi
 }
 
