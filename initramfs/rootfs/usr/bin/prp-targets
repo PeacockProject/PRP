@@ -28,7 +28,12 @@ SFDISK="$(find_sfdisk || true)"
 
 # Bootloader/firmware/tiny partitions never offered (brick risk). Slot _a/_b is
 # stripped before the check.
-DENY="boot lk2nd recovery modem dsp bluetooth fsg fsc ssd dpo sec bk1 bk2 sbl1 sbl rpm tz aboot abl devinfo splash misc keystore cmnlib cmnlib64 devcfg mdtp mdtpsecapp hyp pmic apdp msadp limits ddr frp config persist persistbak logfs oops logdump keymaster xbl xbl_config uefisecapp uefivarstore vbmeta dtbo metadata mota lksecapp cdt cmnlib64bak modemst1 modemst2 fsg_a fsg_b"
+# `vendor` is denied not for brick risk but because it is the SOURCE of the
+# device's firmware blobs: on devices whose firmware is extracted at install
+# time (see firmware-* post-install hooks) rather than redistributed, installing
+# over vendor destroys the only copy — and the install would still look like it
+# succeeded, with the radios/GPU/cameras simply never working afterwards.
+DENY="boot lk2nd recovery modem dsp bluetooth vendor fsg fsc ssd dpo sec bk1 bk2 sbl1 sbl rpm tz aboot abl devinfo splash misc keystore cmnlib cmnlib64 devcfg mdtp mdtpsecapp hyp pmic apdp msadp limits ddr frp config persist persistbak logfs oops logdump keymaster xbl xbl_config uefisecapp uefivarstore vbmeta dtbo metadata mota lksecapp cdt cmnlib64bak modemst1 modemst2 fsg_a fsg_b"
 strip_slot() { printf '%s' "${1%_[ab]}"; }
 is_denied() {
 	n="$(strip_slot "$1")"
