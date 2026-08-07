@@ -1290,6 +1290,44 @@ start_subparts_mount
 debug_snapshot "after-subparts-dispatch"
 pmsg_mark "stage=after-subparts-dispatch"
 
+# Vendor firmware too large to embed (e.g. ginkgo's ~72 MiB modem/ADSP PAS
+# images against a 64 MiB recovery partition) stays on its stock partition; we
+# mount it read-only and point the kernel firmware loader at it. Small derived
+# blobs (ath10k board data, Novatek touch firmware) are baked into /lib/firmware
+# and still resolve, because firmware_class.path is searched BEFORE it.
+#
+# No-op unless the device profile sets FW_RUNTIME_PART. Fail-soft by design: a
+# wiped vendor partition costs the modem, not the recovery session.
+start_firmware_runtime() {
+  local fwconf=""
+  [ "$PRP_RECOVERY_SESSION" = "1" ] && return 0
+  [ -r /usr/lib/prp/firmware-runtime.sh ] || return 0
+
+  for fwconf in /etc/prp/firmware.conf /mnt/prp_rootfs/etc/prp/firmware.conf; do
+    [ -r "$fwconf" ] || continue
+    . "$fwconf"
+    break
+  done
+  [ -n "${FW_RUNTIME_PART:-}" ] || return 0
+
+  . /usr/lib/prp/firmware-runtime.sh
+  prp_firmware_runtime_setup || return 0
+
+  # Cores with auto_boot=false request nothing until told to. Start them in the
+  # background: a PAS bring-up can take tens of seconds and must never stall the
+  # recovery session behind it.
+  if [ -n "${FW_RUNTIME_RPROC_FW:-}" ]; then
+    (
+      prp_rproc_start_by_firmware "$FW_RUNTIME_RPROC_FW" || true
+    ) &
+    log "firmware: remoteproc $FW_RUNTIME_RPROC_FW start queued (pid=$!)"
+  fi
+}
+
+start_firmware_runtime
+debug_snapshot "after-firmware-runtime"
+pmsg_mark "stage=after-firmware-runtime"
+
 start_tty_shell() {
   local tty="$1"
   [ -c "$tty" ] || return 0

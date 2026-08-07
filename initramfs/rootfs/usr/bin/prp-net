@@ -38,9 +38,30 @@ wifi_present() {
 	done
 	return 1
 }
+# Devices whose vendor firmware is too large to embed keep it on a stock
+# partition that init mounts and exposes via firmware_class.path. Re-assert it
+# here (the call is idempotent) so a Wi-Fi request still works when init skipped
+# the setup — e.g. a recovery re-entry session, where the boot path is bypassed.
+ensure_firmware_runtime() {
+	fwconf=""
+	[ -r /usr/lib/prp/firmware-runtime.sh ] || return 0
+	for fwconf in /etc/prp/firmware.conf /mnt/prp_rootfs/etc/prp/firmware.conf; do
+		[ -r "$fwconf" ] || continue
+		. "$fwconf"
+		break
+	done
+	[ -n "${FW_RUNTIME_PART:-}" ] || return 0
+	. /usr/lib/prp/firmware-runtime.sh
+	prp_firmware_runtime_setup >/dev/null 2>&1 || true
+	return 0
+}
+
 load_wifi_modules() {
 	[ "$WIFI_MODULES_TRIED" = 1 ] && return 0
 	WIFI_MODULES_TRIED=1
+	# Before any probe: a builtin ath10k may already have wlan0 up, but the
+	# firmware it pulls at mission-mode start can still live on that partition.
+	ensure_firmware_runtime
 	wifi_present && return 0
 	command -v modprobe >/dev/null 2>&1 || return 0
 

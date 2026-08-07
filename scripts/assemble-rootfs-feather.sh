@@ -64,7 +64,11 @@ rm -rf "$WORK"; mkdir -p "$REPO" "$STAGE" "$KEYS"
 echo "assemble: building shared ports for $ARCH …"
 build_list=()
 for p in "${SHARED_PORTS[@]}"; do
-  if [[ -d "$PROJECT_ROOT/peacock-ports/base/$p" || -d "$PROJECT_ROOT/peacock-ports/device/$p" ]]; then
+  # Probe the SAME tree that was exported above and that `peacock` will resolve
+  # — not a second hardcoded guess. These coincide only when the checkout sits
+  # at $PROJECT_ROOT/peacock-ports; with PEACOCK_PORTS_DIR pointed anywhere else
+  # every port silently "wasn't found" and the build list came out empty.
+  if [[ -d "$PEACOCK_PORTS_DIR/base/$p" || -d "$PEACOCK_PORTS_DIR/device/$p" ]]; then
     build_list+=(-p "$p")
   else
     echo "assemble: WARN port '$p' not found, skipping" >&2
@@ -149,19 +153,77 @@ printf '[[repos]]\nname = "prp"\nurl = "file://%s"\npubkey = "%s"\n' "$REPO" "$K
 # modules ride in the linux-<dev>-prp feather under usr/lib/modules; firmware
 # (wcnss/prima + GPU) in firmware-<dev>.
 echo "assemble: staging kernel modules + firmware …"
-KMOD_FEATHER=$(ls -1 "$PKG_STORE/linux-${TARGET_NAME}-prp-"*"-$ARCH.feather" 2>/dev/null | head -1)
+# `|| true`: with set -e + pipefail a no-match `ls` exits 2 and kills the script,
+# and 2>/dev/null swallows the reason — a silent abort with no diagnostic. These
+# two lookups are optional by design (a modules-free PRP kernel, or firmware that
+# ships as a tarball rather than a local feather), so absence must not be fatal.
+KMOD_FEATHER=$(ls -1 "$PKG_STORE/linux-${TARGET_NAME}-prp-"*"-$ARCH.feather" 2>/dev/null | head -1 || true)
 if [[ -n "$KMOD_FEATHER" ]]; then
   tar -xzf "$KMOD_FEATHER" -C "$STAGE" --strip-components=1 'files/usr/lib/modules' 2>/dev/null \
     && echo "assemble: modules <- $(basename "$KMOD_FEATHER")" \
-    || echo "assemble: WARN no usr/lib/modules in $(basename "$KMOD_FEATHER")"
+    || echo "assemble: WARN no usr/lib/modules in $(basename "$KMOD_FEATHER")" >&2
 else
   echo "assemble: WARN no linux-${TARGET_NAME}-prp feather (no kernel modules)" >&2
 fi
-FW_FEATHER=$(ls -1 "$PKG_STORE/firmware-${TARGET_NAME}-"*"-$ARCH.feather" 2>/dev/null | head -1)
+FW_FEATHER=$(ls -1 "$PKG_STORE/firmware-${TARGET_NAME}-"*"-$ARCH.feather" 2>/dev/null | head -1 || true)
 if [[ -n "$FW_FEATHER" ]]; then
   tar -xzf "$FW_FEATHER" -C "$STAGE" --strip-components=1 'files/lib/firmware' 2>/dev/null \
     && echo "assemble: firmware <- $(basename "$FW_FEATHER")" \
-    || echo "assemble: WARN no lib/firmware in $(basename "$FW_FEATHER")"
+    || echo "assemble: WARN no lib/firmware in $(basename "$FW_FEATHER")" >&2
+fi
+# Some devices' firmware package deliberately ships NO blobs — they aren't
+# redistributable, so the package is an extractor that runs against the phone's
+# own partitions at install time. That works for an installed system but not for
+# building a recovery ramdisk on a host, so those profiles point at a
+# /lib/firmware-shaped tarball instead and name the few paths PRP must carry.
+# The bulk stays on the device and is mounted at runtime (FW_RUNTIME_PART).
+if [[ -n "${FIRMWARE_TARBALL_URL:-}" ]]; then
+  FW_CACHE="${PEACOCK_FW_CACHE:-$HOME/.local/var/peacock/firmware-cache}"
+  mkdir -p "$FW_CACHE"
+  FW_TAR="$FW_CACHE/${TARGET_NAME}-$(basename "$FIRMWARE_TARBALL_URL")"
+  if [[ ! -f "$FW_TAR" ]]; then
+    echo "assemble: fetching vendor firmware tarball …"
+    if command -v curl >/dev/null 2>&1; then
+      curl -fSL -o "$FW_TAR.part" "$FIRMWARE_TARBALL_URL" || die "firmware tarball fetch failed: $FIRMWARE_TARBALL_URL"
+    elif command -v wget >/dev/null 2>&1; then
+      wget -qO "$FW_TAR.part" "$FIRMWARE_TARBALL_URL" || die "firmware tarball fetch failed: $FIRMWARE_TARBALL_URL"
+    else
+      die "need curl or wget to fetch FIRMWARE_TARBALL_URL"
+    fi
+    mv "$FW_TAR.part" "$FW_TAR"
+  fi
+  # The tarball is served over plain HTTPS with no detached signature, unlike the
+  # signed .feather packages — so the digest in the device profile is the only
+  # integrity anchor there is. Refuse to bake in unverified firmware.
+  if [[ -n "${FIRMWARE_TARBALL_SHA256:-}" ]]; then
+    _got="$(sha256sum "$FW_TAR" | awk '{print $1}')"
+    [[ "$_got" == "$FIRMWARE_TARBALL_SHA256" ]] || {
+      rm -f "$FW_TAR"
+      die "firmware tarball digest mismatch: got $_got want $FIRMWARE_TARBALL_SHA256"
+    }
+    echo "assemble: firmware tarball digest OK"
+  else
+    echo "assemble: WARN FIRMWARE_TARBALL_SHA256 unset — firmware is unverified" >&2
+  fi
+  _fwtmp="$OUT_DIR/firmware-unpack"
+  rm -rf "$_fwtmp"; mkdir -p "$_fwtmp"
+  tar -xzf "$FW_TAR" -C "$_fwtmp"
+  mkdir -p "$STAGE/lib/firmware"
+  if [[ -n "${FIRMWARE_INCLUDE:-}" ]]; then
+    for _inc in $FIRMWARE_INCLUDE; do
+      if [[ -e "$_fwtmp/$_inc" ]]; then
+        mkdir -p "$STAGE/lib/firmware/$(dirname "$_inc")"
+        cp -a "$_fwtmp/$_inc" "$STAGE/lib/firmware/$_inc"
+      else
+        echo "assemble: WARN FIRMWARE_INCLUDE path not in tarball: $_inc" >&2
+      fi
+    done
+    echo "assemble: firmware <- tarball subset ($(du -sh "$STAGE/lib/firmware" | cut -f1))"
+  else
+    cp -a "$_fwtmp/." "$STAGE/lib/firmware/"
+    echo "assemble: firmware <- tarball, whole ($(du -sh "$STAGE/lib/firmware" | cut -f1))"
+  fi
+  rm -rf "$_fwtmp"
 fi
 # Generic wireless-regdb (regulatory.db) so 5GHz/DFS channels become usable once
 # a country is set (prp-net WIFI_COUNTRY). Vendored in-repo; the kernel verifies
@@ -173,7 +235,10 @@ if [[ -f "$PRP_ROOT/firmware/wireless-regdb/regulatory.db" ]]; then
   echo "assemble: regulatory.db <- vendored wireless-regdb"
 fi
 # Regenerate modules.dep so on-device modprobe can resolve the wifi stack.
-KVER=$(ls "$STAGE/usr/lib/modules/" 2>/dev/null | head -1)
+# `|| true` for the same reason as the feather lookups above: a PRP kernel built
+# with CONFIG_MODULES=n stages no usr/lib/modules at all, and the bare `ls` would
+# otherwise exit 2 and abort the whole assembly one line before it finishes.
+KVER=$(ls "$STAGE/usr/lib/modules/" 2>/dev/null | head -1 || true)
 if [[ -n "$KVER" ]] && command -v depmod >/dev/null 2>&1; then
   depmod -b "$STAGE" "$KVER" 2>/dev/null && echo "assemble: depmod $KVER" || true
 fi
@@ -231,6 +296,22 @@ fi
   printf 'BOOT_CMDLINE="%s"\n' "${CMDLINE:-}"
 } >"$STAGE/etc/prp/device.conf"
 echo "assemble: device.conf -> split=$_split slot=${_slot:-none} part=$_bootpart codename=$TARGET_NAME"
+
+# On-device /etc/prp/firmware.conf: where the large vendor blobs live. Kept in
+# its own file rather than device.conf because init sources it directly, and
+# device.conf carries mkbootimg variables (PAGESIZE, BOARD_NAME, …) that would
+# be reckless to pull into PID 1's namespace.
+if [[ -n "${FW_RUNTIME_PART:-}" ]]; then
+  {
+    printf '# Generated by assemble-rootfs-feather.sh from the %s device profile.\n' "$TARGET_NAME"
+    printf '# Consumed by init + prp-net via usr/lib/prp/firmware-runtime.sh.\n'
+    printf 'FW_RUNTIME_PART=%s\n' "$FW_RUNTIME_PART"
+    printf 'FW_RUNTIME_SUBDIR=%s\n' "${FW_RUNTIME_SUBDIR:-}"
+    printf 'FW_RUNTIME_FSTYPE=%s\n' "${FW_RUNTIME_FSTYPE:-vfat}"
+    printf 'FW_RUNTIME_RPROC_FW=%s\n' "${FW_RUNTIME_RPROC_FW:-}"
+  } >"$STAGE/etc/prp/firmware.conf"
+  echo "assemble: firmware.conf -> part=$FW_RUNTIME_PART subdir=${FW_RUNTIME_SUBDIR:-/} rproc=${FW_RUNTIME_RPROC_FW:-none}"
+fi
 
 # On-device prp-gui.conf: DPI scale for the panel (templated from GUI_SCALE).
 echo "assemble: writing on-device /etc/prp-gui.conf (scale=${GUI_SCALE:-100}) …"

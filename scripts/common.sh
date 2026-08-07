@@ -108,6 +108,29 @@ load_config() {
   # is readable + smooth on high-DPI panels. 100 = native; 200 = 2x (e.g. daisy's
   # 1080x2280). Overridable per-device .env.
   GUI_SCALE="${GUI_SCALE:-100}"
+
+  # --- vendor firmware -------------------------------------------------------
+  # Two halves, because not all of it fits in a recovery ramdisk.
+  #
+  # Baked in: a /lib/firmware-shaped tarball, of which only FIRMWARE_INCLUDE is
+  # staged. Use this for blobs PRP cannot reconstruct on device — ones that are
+  # derived rather than copied (ath10k's board-2.bin is repackaged from a raw
+  # BDF; the Novatek touch firmware is renamed), so a runtime mount cannot
+  # produce them. Keep the list tight: every byte lands in the boot image.
+  FIRMWARE_TARBALL_URL="${FIRMWARE_TARBALL_URL:-}"
+  FIRMWARE_TARBALL_SHA256="${FIRMWARE_TARBALL_SHA256:-}"
+  FIRMWARE_INCLUDE="${FIRMWARE_INCLUDE:-}"
+  #
+  # Mounted at runtime: the large remainder, read verbatim off a stock partition
+  # the device already carries. init mounts it read-only and hands it to the
+  # kernel via firmware_class.path (searched before /lib/firmware), so nothing
+  # needs copying. See initramfs/rootfs/usr/lib/prp/firmware-runtime.sh.
+  FW_RUNTIME_PART="${FW_RUNTIME_PART:-}"
+  FW_RUNTIME_SUBDIR="${FW_RUNTIME_SUBDIR:-}"
+  FW_RUNTIME_FSTYPE="${FW_RUNTIME_FSTYPE:-vfat}"
+  # Firmware filename of a remoteproc to start once that path is live (only for
+  # cores whose PAS descriptor sets auto_boot=false). Empty = start nothing.
+  FW_RUNTIME_RPROC_FW="${FW_RUNTIME_RPROC_FW:-}"
 }
 
 # Substitute the @PRP_*@ template tokens in a copy of /init. Single-sourced so
